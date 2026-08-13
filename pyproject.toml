@@ -1,0 +1,40 @@
+[project]
+name = "tts-books"
+version = "0.1.0"
+description = "CPU-only text-to-speech audiobook generator built on Chatterbox Turbo TTS"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "David Romney" }]
+keywords = ["tts", "audiobook", "chatterbox", "text-to-speech", "cpu"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+# Dependencies are declared in requirements.txt for now; a full move to
+# pyproject-managed dependencies is deferred until the package refactor
+# (see docs/REFACTOR-PLAN.md).
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # line-length handled by formatter
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
