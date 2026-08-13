@@ -1,0 +1,28 @@
+--- a/chatterbox/models/t3/t3.py
++++ b/chatterbox/models/t3/t3.py
+@@ -13,6 +13,7 @@
+ from transformers.generation.logits_process import (
+     LogitsProcessorList,
+     RepetitionPenaltyLogitsProcessor,
++    NoRepeatNGramLogitsProcessor,
+     TemperatureLogitsWarper,
+     TopKLogitsWarper,
+     TopPLogitsWarper,
+@@ -413,7 +414,7 @@
+ 
+     @torch.inference_mode()
+     def inference_turbo(self, t3_cond, text_tokens, temperature=0.8, top_k=1000, top_p=0.95, repetition_penalty=1.2,
+-                        max_gen_len=1000):
++                        max_gen_len=4000, no_repeat_ngram_size=6):
+ 
+         logits_processors = LogitsProcessorList()
+         if temperature > 0 and temperature != 1.0:
+@@ -424,6 +425,8 @@
+             logits_processors.append(TopPLogitsWarper(top_p))
+         if repetition_penalty != 1.0:
+             logits_processors.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
++        if no_repeat_ngram_size > 1:
++            logits_processors.append(NoRepeatNGramLogitsProcessor(no_repeat_ngram_size))
+ 
+ 
+         speech_start_token = self.hp.start_speech_token * torch.ones_like(text_tokens[:, :1])

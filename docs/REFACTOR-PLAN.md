@@ -7,7 +7,7 @@
 - ✅ Phase 5 — thin launcher scripts wrapping installed entry points (done)
 - ⏳ Phase 3.1-3.3 — break up gui.py per the 13-step extraction order
 - ⏳ Phase 4 — test scaffolding (partial: 36 tests -- 22 prep-class + 14 paths; broader coverage pending)
-- ⏳ Phase 6 — Chatterbox patches as patch files
+- ✅ Phase 6 — Chatterbox patches as patch files (done — patches/; apply.sh idempotent)
 - ⏳ Phase 7 — CI + release
 
 **Motivation:** The current layout was flat scripts with hardcoded `~/bin/` paths, a 2000+ line monolithic `tts_book_gui.py`, and no tests. Phases 1 and 5 resolved the flat-scripts and `~/bin/` coupling; the monolith is now `src/tts_books/gui.py` awaiting the 3.1 extraction.
@@ -270,15 +270,15 @@ No more `$HOME/bin/tts_book_gui.py` reference; the entry point comes from the in
 
 Currently the Chatterbox patches (documented in `docs/CLAUDE.md`) live inside the venv's `site-packages/`. Reapplying them after an upgrade is manual.
 
-Ship them under `patches/`:
+**Done.** Shipped under `patches/`:
 ```
 patches/
-    chatterbox-tts_turbo-cache-conds-and-kwargs.patch
+    chatterbox-tts_turbo-max-gen-len-and-ngram-kwargs.patch
     chatterbox-t3-max-gen-len-and-ngram-guard.patch
-    apply.sh                Auto-apply against the installed chatterbox package
+    apply.sh        idempotent apply script (--dry-run first; skips already-applied hunks)
 ```
 
-`apply.sh` locates the installed `chatterbox` package (`python -c "import chatterbox; print(chatterbox.__path__[0])"`), then runs `patch -p1 --forward` against each file, verifying the checksum first so we don't re-apply blindly on an unfamiliar upstream version.
+`apply.sh` accepts an optional venv path (defaults to `~/chatterbox-venv`), uses `patch -f -p1` against `site-packages/`, and is safe to re-run after upgrades.
 
 Consider upstreaming the two patches to the Chatterbox project — they're small, general-purpose improvements (allocation cap, n-gram guard).
 
