@@ -40,6 +40,7 @@ from tts_books.config import (
     save_config,
 )
 from tts_books.memory.pruning import do_prune, mem_rss_mb
+from tts_books.quality.whisper_backend import whisper as _whisper
 from tts_books.generation.chunking import split_text
 from tts_books.generation.stitching import crossfade_chunks, remove_dc_offset
 from tts_books.io.text_extract import load_text_file
@@ -2640,10 +2641,9 @@ class TTSBookApp:
         expected_set = {_tokenize(w) for w in text.split() if len(w) >= 3 and '-' not in w}
 
         try:
-            first_load = (_whisper_model is None and not _whisper_unavailable)
-            if first_load:
+            if not _whisper.is_loaded and not _whisper.is_unavailable:
                 self._log("  Loading faster-whisper tiny.en for garble detection…", "info")
-            wm = _load_whisper()
+            wm = _whisper.load()
             if wm is None:
                 return None
 
@@ -3008,10 +3008,8 @@ class TTSBookApp:
                     ctypes.CDLL("libc.so.6").malloc_trim(0)
 
                 # Periodically unload whisper to release ctranslate2 memory arena
-                global _whisper_model
-                if i > 0 and i % 25 == 0 and _whisper_model is not None:
-                    del _whisper_model
-                    _whisper_model = None
+                if i > 0 and i % 25 == 0 and _whisper.is_loaded:
+                    _whisper.unload()
                     gc.collect()
                     ctypes.CDLL("libc.so.6").malloc_trim(0)
                     self._log(f"  Whisper reloaded at chunk {i+1} to free ctranslate2 memory", "info")
@@ -3021,9 +3019,7 @@ class TTSBookApp:
                     import psutil
                     _avail = psutil.virtual_memory().available
                     if _avail < _PRUNE_THRESHOLD_GB * 1024 ** 3:
-                        if _whisper_model is not None:
-                            del _whisper_model
-                            _whisper_model = None
+                        _whisper.unload()
                         gc.collect()
                         ctypes.CDLL("libc.so.6").malloc_trim(0)
                         _proc_mb, _free_mb = mem_rss_mb()
@@ -3111,9 +3107,7 @@ class TTSBookApp:
                     # Free the old model and whisper FIRST so malloc_trim can return
                     # their pages to the OS before we measure free RAM or load fresh.
                     self.model = None
-                    if _whisper_model is not None:
-                        del _whisper_model
-                        _whisper_model = None
+                    _whisper.unload()
                     for _ in range(3):
                         gc.collect()
                     ctypes.CDLL("libc.so.6").malloc_trim(0)
