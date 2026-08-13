@@ -63,8 +63,12 @@ def capture_chapters(start_url, output_file):
                 time.sleep(DELAY)
     print(f"\nFinished — {count} chapters written to {output_file}", flush=True)
 
-if __name__ == "__main__":
+def main():
     capture_chapters(
         start_url="https://www.royalroad.com/fiction/21220/mother-of-learning/chapter/301778/1-good-morning-brother",
         output_file="/home/dqromney/books/mother-of-learning.txt",
     )
+
+
+if __name__ == "__main__":
+    main()

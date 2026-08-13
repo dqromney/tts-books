@@ -63,8 +63,12 @@ def capture_chapters(start_url, output_file):
                 time.sleep(DELAY)
     print(f"\nFinished — {count} chapters written to {output_file}", flush=True)
 
-if __name__ == "__main__":
+def main():
     capture_chapters(
         start_url="https://www.royalroad.com/fiction/71045/zenith-of-sorcery/chapter/1269005/1-homecoming",
         output_file="/home/dqromney/books/zenith-of-sorcery.txt",
     )
+
+
+if __name__ == "__main__":
+    main()

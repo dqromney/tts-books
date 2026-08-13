@@ -2,17 +2,15 @@
 
 Covers CancelToken, Settings, and BatchItem -- introduced by commits
 0ca1624, f4fae4a, b9a2e95. These classes are all pure Python (threading,
-dataclasses); no tkinter needed. Runs against the whole tts_book_gui
-module import for now (they move to standalone modules in Phase 3.1).
+dataclasses); no tkinter needed. Runs against tts_books.gui for now
+(they move to standalone modules in Phase 3.1).
 """
 
 import threading
 import time
 from dataclasses import fields as dataclass_fields
 
-import pytest
-
-from tts_book_gui import BatchItem, CancelToken, Settings
+from tts_books.gui import BatchItem, CancelToken, Settings
 
 
 # ── CancelToken ───────────────────────────────────────────────────

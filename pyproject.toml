@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tts-books"
 version = "0.1.0"
@@ -12,7 +16,6 @@ classifiers = [
     "Environment :: Console",
     "Environment :: X11 Applications",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -20,8 +23,17 @@ classifiers = [
 ]
 
 # Dependencies are declared in requirements.txt for now; a full move to
-# pyproject-managed dependencies is deferred until the package refactor
-# (see docs/REFACTOR-PLAN.md).
+# pyproject-managed dependencies is deferred until Phase 4/6 of
+# docs/REFACTOR-PLAN.md.
+
+[project.scripts]
+tts-book = "tts_books.gui:main"
+tts-book-web = "tts_books.gradio_app:main"
+capture-mol = "tts_books.scrapers.mother_of_learning:main"
+capture-zos = "tts_books.scrapers.zenith_of_sorcery:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.black]
 line-length = 100
@@ -38,4 +50,4 @@ ignore = ["E501"]  # line-length handled by formatter
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
-pythonpath = ["."]
+pythonpath = ["src"]

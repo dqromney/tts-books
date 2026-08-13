@@ -278,8 +278,12 @@ with gr.Blocks(title="Chatterbox Turbo") as demo:
         outputs=audio_output,
     )
 
-if __name__ == "__main__":
+def main():
     demo.queue(
         max_size=50,
         default_concurrency_limit=1,
     ).launch(share=True, inbrowser=True, css=CUSTOM_CSS)
+
+
+if __name__ == "__main__":
+    main()
