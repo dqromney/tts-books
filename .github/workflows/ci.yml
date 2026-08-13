@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install CPU torch and test dependencies
+        run: |
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy scipy ruff
+
+      - name: Install package (editable)
+        run: pip install -e .
+
+      - name: Lint — ruff
+        run: ruff check src/ tests/
+
+      - name: Test
+        # test_prep_refactors.py imports tts_books.gui → tts_books.generation.pipeline
+        # → chatterbox-tts (not installed in CI — model is too large for a CI runner).
+        # BatchItem / Settings / CancelToken are pure Python; run those tests locally.
+        run: >
+          pytest
+          --ignore=tests/test_prep_refactors.py
+          -m "not slow"
+          -q

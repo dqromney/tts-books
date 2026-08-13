@@ -10,7 +10,6 @@ import pytest
 
 from tts_books.generation.archiving import archive_job, restore_for_rework, scan_rework_jobs
 
-
 # ── stub logger ──────────────────────────────────────────────────────────────
 
 class StubLogger:
@@ -88,7 +87,8 @@ class TestArchiveJob:
 
         log_path = os.path.join(dest, "generation.log")
         assert os.path.isfile(log_path)
-        content = open(log_path).read()
+        with open(log_path) as fh:
+            content = fh.read()
         assert "chunk 1 done" in content
 
     def test_no_rework_json_when_no_garbled(self, tmp_path):
@@ -106,7 +106,8 @@ class TestArchiveJob:
 
         rp = os.path.join(dest, "rework.json")
         assert os.path.isfile(rp)
-        data = json.loads(open(rp).read())
+        with open(rp) as fh:
+            data = json.loads(fh.read())
         assert data["output_path"] == "/tmp/out.wav"
         assert len(data["rework_chunks"]) == 1
         assert data["rework_chunks"][0]["index"] == 1
@@ -116,7 +117,8 @@ class TestArchiveJob:
         jd = _make_job_dir(tmp_path)
         archive_dir = str(tmp_path / "archive")
         dest = archive_job(jd, garbled, "/tmp/out.wav", archive_dir, StubLogger())
-        data = json.loads(open(os.path.join(dest, "rework.json")).read())
+        with open(os.path.join(dest, "rework.json")) as fh:
+            data = json.loads(fh.read())
         assert "archived" in data
 
     def test_existing_dest_gets_timestamp_suffix(self, tmp_path):

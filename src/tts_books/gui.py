@@ -9,6 +9,7 @@ Features:
 - Redesigned Advanced Options panel
 """
 
+import contextlib
 import json
 import os
 import re
@@ -256,10 +257,8 @@ class TTSBookApp:
                          'TCheckbutton', 'TRadiobutton', 'TButton',
                          'TNotebook', 'TNotebook.Tab', 'Treeview',
                          'Treeview.Heading', 'TScrollbar', 'TSeparator'):
-                try:
+                with contextlib.suppress(tk.TclError):
                     _style.configure(_cls, **_COMMON)
-                except tk.TclError:
-                    pass
             # Treeview needs its row background set separately
             _style.configure('Treeview', rowheight=22)
             # Make hovering/active state legible too
@@ -428,7 +427,7 @@ class TTSBookApp:
         self.seed = tk.IntVar(value=0)
         self.cpu_threads = tk.IntVar(value=4)
         self.split_clauses = tk.BooleanVar(value=True)
-        self.chunk_size = tk.IntVar(value=MAX_CHARS_PER_CHUNK)
+        self.chunk_size = tk.IntVar(value=200)
         self.lead_silence = tk.DoubleVar(value=0.0)
         self.trail_silence = tk.DoubleVar(value=0.0)
         self.reload_every = tk.IntVar(value=0)   # periodic model reload (0=disabled)
@@ -1411,10 +1410,8 @@ class TTSBookApp:
     def _cleanup_item_sidecar(self, item):
         sidecar = item.get("_text_sidecar")
         if sidecar and os.path.isfile(sidecar):
-            try:
+            with contextlib.suppress(Exception):
                 os.remove(sidecar)
-            except Exception:
-                pass
 
     def _reflect_batch_change(self):
         """Refresh tree + persist after any queue modification."""
@@ -2549,7 +2546,6 @@ class TTSBookApp:
 
         def _sort_by(col):
             """Sort jobs list in-place by col, toggle asc/desc, refresh tree."""
-            col_idx = {"output": 1, "archived": 3}[col]
             asc = not sort_state["asc"] if sort_state["col"] == col else True
             sort_state["col"] = col
             sort_state["asc"] = asc
@@ -2715,7 +2711,6 @@ class TTSBookApp:
             return
 
         job_id = os.path.basename(arc_dir)
-        bad_count = len(state.get("completed", [])) - sum(1 for _ in state.get("completed", []))
         # Archive is deleted AFTER restore so the job is safe in jobs/ first (Risk #6)
         shutil.rmtree(arc_dir, ignore_errors=True)
         self.root.after(0, self._refresh_rework_badge)
@@ -2784,7 +2779,7 @@ def main():
         print(f"Migrated {legacy} -> {new}")
 
     root = tk.Tk()
-    app = TTSBookApp(root, auto_resume=args.auto_resume)
+    _app = TTSBookApp(root, auto_resume=args.auto_resume)
     root.mainloop()
 
 

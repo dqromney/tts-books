@@ -1,10 +1,11 @@
 import random
 import re
+
+import fitz  # pymupdf
+import gradio as gr
 import numpy as np
 import torch
 import torch as th
-import fitz  # pymupdf
-import gradio as gr
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
 DEVICE = "cpu"  # Quadro M2200 has only 4GB VRAM, Turbo model needs more
@@ -51,7 +52,7 @@ CUSTOM_CSS = """
 INSERT_TAG_JS = """
 (tag_val, current_text) => {
     const textarea = document.querySelector('#main_textbox textarea');
-    if (!textarea) return current_text + " " + tag_val; 
+    if (!textarea) return current_text + " " + tag_val;
 
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
@@ -95,8 +96,8 @@ def load_text_file(file):
         return text
     elif path.lower().endswith('.epub'):
         import ebooklib
-        from ebooklib import epub
         from bs4 import BeautifulSoup
+        from ebooklib import epub
         book = epub.read_epub(path)
         texts = []
         for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
@@ -104,7 +105,7 @@ def load_text_file(file):
             texts.append(soup.get_text())
         return '\n\n'.join(texts)
     else:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, encoding='utf-8') as f:
             return f.read()
 
 
@@ -136,7 +137,7 @@ def generate(
         top_k,
         repetition_penalty,
         norm_loudness,
-        progress=gr.Progress(),
+        progress=gr.Progress(),  # noqa: B008
 ):
     if model is None:
         model = ChatterboxTurboTTS.from_pretrained(DEVICE)
@@ -148,7 +149,9 @@ def generate(
     total = len(chunks)
     print(f"Generating {total} chunk(s)...")
 
-    import tempfile, os
+    import os
+    import tempfile
+
     import torchaudio
 
     tmpdir = tempfile.mkdtemp(prefix="tts_chunks_")
