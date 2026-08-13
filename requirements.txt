@@ -1,0 +1,26 @@
+# Core TTS
+chatterbox-tts
+torch
+torchaudio
+
+# Audio processing (DC-offset high-pass, crossfade math)
+numpy
+scipy
+
+# Book / document ingestion
+PyMuPDF          # provides `fitz` — PDF text extraction
+EbookLib         # EPUB extraction
+beautifulsoup4   # HTML parsing (EPUB + Royal Road scrapers)
+lxml             # BeautifulSoup parser backend
+
+# Voice sample browsing
+huggingface_hub>=1.19    # VoxCeleb1 dataset access via hf_hub_download
+
+# Garbled-chunk detection
+faster-whisper           # STT verification for retry loop
+
+# Web UI (alternative to tkinter GUI)
+gradio
+
+# HTTP for scrapers
+requests

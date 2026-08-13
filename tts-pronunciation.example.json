@@ -1,0 +1,46 @@
+{
+  "Abish": {
+    "enabled": false,
+    "replacement": "ay-bish"
+  },
+  "Ammon": {
+    "enabled": false,
+    "replacement": "Ah-mun"
+  },
+  "Enoch": {
+    "enabled": false,
+    "replacement": "Ee-nock"
+  },
+  "Lamanite": {
+    "enabled": false,
+    "replacement": "Lay-men-ite"
+  },
+  "Lamanites": {
+    "enabled": false,
+    "replacement": "Lay-men-ites"
+  },
+  "Lamoni": {
+    "enabled": false,
+    "replacement": "La-moan-ee"
+  },
+  "Mosiah": {
+    "enabled": false,
+    "replacement": "mo-sigh-a"
+  },
+  "Nephi": {
+    "enabled": false,
+    "replacement": "Nee-fee"
+  },
+  "Nephite": {
+    "enabled": false,
+    "replacement": "Nee-fight"
+  },
+  "Nephites": {
+    "enabled": false,
+    "replacement": "Nee-fights"
+  },
+  "women": {
+    "enabled": false,
+    "replacement": "wim-in"
+  }
+}

@@ -1,0 +1,64 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# Runtime state (user-specific — never commit)
+tts-book.config
+tts-book.queue.json
+tts-book.queue-*.txt
+tts-pronunciation.json
+
+# Generated audio and job dirs (large binaries)
+tts_output/
+jobs/
+archive/
+*.wav
+*.mp3
+
+# Voice reference clips (live in ~/voice-samples, not the repo)
+voice-samples/
+
+# Book source material (personal)
+books/
+
+# Backups
+*.bak
+*.bak-*
+*~
+
+# Logs
+*.log
+generation.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gradio cache
+.gradio/
+
+# Private notes (chmod 600 files)
+*.private.md

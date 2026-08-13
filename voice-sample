@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# voice-sample — extract a voice clip from a YouTube/streaming video
+# Usage: voice-sample <name> <url> [start_sec] [duration_sec]
+# Example: voice-sample theron "https://www.youtube.com/watch?v=ltusqK6tjjU" 45 20
+
+set -euo pipefail
+
+NAME="${1:?Usage: voice-sample <name> <url> [start_sec] [duration_sec]}"
+URL="${2:?Missing URL}"
+START="${3:-10}"
+DURATION="${4:-20}"
+
+OUTDIR="${VOICE_SAMPLE_DIR:-$HOME/voice-samples}"
+OUTFILE="$OUTDIR/${NAME}.wav"
+VENV="$HOME/chatterbox-venv"
+
+mkdir -p "$OUTDIR"
+
+if [[ ! -d "$VENV" ]]; then
+    echo "Error: venv not found at $VENV" >&2
+    exit 1
+fi
+
+source "$VENV/bin/activate"
+
+echo "→ Extracting ${DURATION}s from $START seconds in…"
+echo "  Source: $URL"
+echo "  Output: $OUTFILE"
+echo
+
+# Try 1: cookies + node challenge solver + ejs
+echo "[1/3] Trying cookies + node + ejs…"
+if yt-dlp -q -f "bestaudio" -x --audio-format wav \
+    --postprocessor-args "ffmpeg:-ss $START -t $DURATION" \
+    --cookies-from-browser firefox \
+    --js-runtimes node \
+    --remote-components ejs:github \
+    "$URL" -o "$OUTFILE" 2>/dev/null; then
+
+    SIZE=$(wc -c < "$OUTFILE")
+    if [[ "$SIZE" -gt 1000 ]]; then
+        echo "✓ Success (${SIZE} bytes)"
+        echo "$OUTFILE"
+        exit 0
+    fi
+    echo "  Got ${SIZE} bytes — probably empty, trying next…"
+fi
+
+# Try 2: cookies only (no JS solver)
+echo "[2/3] Trying cookies only…"
+if yt-dlp -q -f "bestaudio" -x --audio-format wav \
+    --postprocessor-args "ffmpeg:-ss $START -t $DURATION" \
+    --cookies-from-browser firefox \
+    "$URL" -o "$OUTFILE" 2>/dev/null; then
+
+    SIZE=$(wc -c < "$OUTFILE")
+    if [[ "$SIZE" -gt 1000 ]]; then
+        echo "✓ Success (${SIZE} bytes)"
+        echo "$OUTFILE"
+        exit 0
+    fi
+    echo "  Got ${SIZE} bytes — probably empty, trying next…"
+fi
+
+# Try 3: no cookies, no JS (works for non-YouTube sources)
+echo "[3/3] Trying bare download…"
+if yt-dlp -q -f "bestaudio" -x --audio-format wav \
+    --postprocessor-args "ffmpeg:-ss $START -t $DURATION" \
+    "$URL" -o "$OUTFILE" 2>/dev/null; then
+
+    SIZE=$(wc -c < "$OUTFILE")
+    if [[ "$SIZE" -gt 1000 ]]; then
+        echo "✓ Success (${SIZE} bytes)"
+        echo "$OUTFILE"
+        exit 0
+    fi
+fi
+
+# Fallback: record system audio manually
+echo
+echo "─────────────────────────────────────────"
+echo "All automatic methods failed."
+echo "Manual fallback — recording system audio."
+echo "─────────────────────────────────────────"
+echo "Play the video now. Press Ctrl+C when done."
+echo
+
+DEFAULT_SINK=$(pactl get-default-sink)
+MONITOR="${DEFAULT_SINK}.monitor"
+
+parec --format=s16le --rate=44100 --channels=1 -d "$MONITOR" | \
+    ffmpeg -y -f s16le -ar 44100 -ac 1 -i - -t "$DURATION" "$OUTFILE" 2>/dev/null
+
+SIZE=$(wc -c < "$OUTFILE")
+if [[ "$SIZE" -gt 1000 ]]; then
+    echo "✓ Recorded (${SIZE} bytes)"
+    echo "$OUTFILE"
+else
+    echo "✗ Recording failed or got silence."
+    rm -f "$OUTFILE"
+    exit 1
+fi
