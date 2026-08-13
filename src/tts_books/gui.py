@@ -39,6 +39,7 @@ from tts_books.config import (
     load_config,
     save_config,
 )
+from tts_books.memory.pruning import do_prune, mem_rss_mb
 from tts_books.generation.chunking import split_text
 from tts_books.generation.stitching import crossfade_chunks, remove_dc_offset
 from tts_books.io.text_extract import load_text_file
@@ -2813,15 +2814,6 @@ class TTSBookApp:
             pass
         return None
 
-    def _mem_rss_mb(self):
-        """Return (process_rss_mb, system_free_mb) via psutil, or (0, 0) if unavailable."""
-        try:
-            import psutil
-            return (psutil.Process().memory_info().rss / (1024 * 1024),
-                    psutil.virtual_memory().available / (1024 * 1024))
-        except Exception:
-            return 0.0, 0.0
-
     def _update_mem_bar(self):
         """Refresh the toolbar RAM progress bar with current system memory usage."""
         try:
@@ -2837,10 +2829,7 @@ class TTSBookApp:
 
     def _manual_prune(self):
         """Trigger GC + malloc_trim and log the RSS before/after."""
-        before_mb, _ = self._mem_rss_mb()
-        gc.collect()
-        ctypes.CDLL("libc.so.6").malloc_trim(0)
-        after_mb, free_mb = self._mem_rss_mb()
+        before_mb, after_mb, free_mb = do_prune()
         freed = before_mb - after_mb
         self._log(
             f"Prune: {before_mb/1024:.2f} GB → {after_mb/1024:.2f} GB RSS"
@@ -2865,9 +2854,9 @@ class TTSBookApp:
         if self.model is None:
             self.root.after(0, lambda: self.status.config(text="Loading model…", foreground="black"))
             t0 = time.time()
-            _rss_before = self._mem_rss_mb()[0]
+            _rss_before = mem_rss_mb()[0]
             self.model = ChatterboxTurboTTS.from_pretrained(DEVICE)
-            _rss_after, _sys_free = self._mem_rss_mb()
+            _rss_after, _sys_free = mem_rss_mb()
             self._model_mem_mb = max(0.0, _rss_after - _rss_before)
             self._log(
                 f"Model loaded in {time.time()-t0:.1f}s"
@@ -3037,7 +3026,7 @@ class TTSBookApp:
                             _whisper_model = None
                         gc.collect()
                         ctypes.CDLL("libc.so.6").malloc_trim(0)
-                        _proc_mb, _free_mb = self._mem_rss_mb()
+                        _proc_mb, _free_mb = mem_rss_mb()
                         self._log(
                             f"  ⚠ Low RAM auto-prune: {_free_mb/1024:.1f} GB free"
                             f", {_proc_mb/1024:.1f} GB RSS",
@@ -3129,7 +3118,7 @@ class TTSBookApp:
                         gc.collect()
                     ctypes.CDLL("libc.so.6").malloc_trim(0)
                     time.sleep(0.5)   # let OS reclaim mmap'd pages
-                    _proc, free_mb = self._mem_rss_mb()
+                    _proc, free_mb = mem_rss_mb()
                     if free_mb < 10 * 1024:   # < 10 GB free after full cleanup
                         self._log(
                             f"  ⚠ Only {free_mb/1024:.1f} GB free after cleanup — "
@@ -3140,7 +3129,7 @@ class TTSBookApp:
                     if ref_path:
                         self.model.prepare_conditionals(ref_path,
                             norm_loudness=settings.get("norm_loudness", True))
-                    proc_mb, free_mb = self._mem_rss_mb()
+                    proc_mb, free_mb = mem_rss_mb()
                     self._log(
                         f"  Model reloaded in {time.time()-t_reload:.0f}s"
                         f" | {proc_mb/1024:.1f} GB RSS, {free_mb/1024:.1f} GB free",
@@ -3151,7 +3140,7 @@ class TTSBookApp:
                 if i % 10 == 0 or i == 0 or i == total - 1:
                     avg_t = statistics.mean(chunk_times) if chunk_times else 0
                     eta = avg_t * (total - len(completed))
-                    proc_mb, free_mb = self._mem_rss_mb()
+                    proc_mb, free_mb = mem_rss_mb()
                     self._log(
                         f"Chunk {i+1}/{total} ({elapsed:.1f}s, avg {avg_t:.1f}s, ETA {eta/60:.0f}m)"
                         f" | {proc_mb/1024:.1f} GB RSS, {free_mb/1024:.1f} GB free",
