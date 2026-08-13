@@ -160,6 +160,13 @@ Controlled by the "Crossfade (ms, 0=off)" spinbox in Advanced Options (default 5
 
 These files under `~/chatterbox-venv/lib/python3.12/site-packages/chatterbox/` have been patched and differ from the upstream release. Do not overwrite them with a package upgrade without re-applying these changes.
 
+Patch files live in `patches/` in this repo. After a `pip install --upgrade chatterbox-tts` run:
+```bash
+./patches/apply.sh            # defaults to ~/chatterbox-venv
+./patches/apply.sh /path/to/other-venv
+```
+The script is idempotent — it skips hunks that are already applied.
+
 ### `tts_turbo.py` — `generate()`
 
 - `prepare_conditionals()` is called **once per job** (before the chunk loop in `src/tts_books/gui.py`). Each subsequent chunk call passes `audio_prompt_path=None` so the cached `self.conds` is reused without re-loading the reference WAV on every chunk.

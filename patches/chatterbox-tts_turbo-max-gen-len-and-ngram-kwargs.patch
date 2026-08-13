@@ -1,0 +1,30 @@
+--- a/chatterbox/tts_turbo.py
++++ b/chatterbox/tts_turbo.py
+@@ -257,6 +257,8 @@
+         temperature=0.8,
+         top_k=1000,
+         norm_loudness=True,
++        max_gen_len=None,
++        no_repeat_ngram_size=6,
+     ):
+         if audio_prompt_path:
+             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration, norm_loudness=norm_loudness)
+@@ -271,6 +273,9 @@
+         text_tokens = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+         text_tokens = text_tokens.input_ids.to(self.device)
+ 
++        if max_gen_len is None:
++            max_gen_len = max(2000, len(text) * 25)
++
+         speech_tokens = self.t3.inference_turbo(
+             t3_cond=self.conds.t3,
+             text_tokens=text_tokens,
+@@ -278,6 +283,8 @@
+             top_k=top_k,
+             top_p=top_p,
+             repetition_penalty=repetition_penalty,
++            max_gen_len=max_gen_len,
++            no_repeat_ngram_size=no_repeat_ngram_size,
+         )
+ 
+         # Remove OOV tokens and add silence to end
