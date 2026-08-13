@@ -412,6 +412,47 @@ def _remove_dc_offset(audio, sr, cutoff_hz=15.0):
     return th.from_numpy(filtered).unsqueeze(0)
 
 
+class CancelToken:
+    """Thread-safe cancel + pause signal for background jobs.
+
+    Consolidates cancel_flag (bool) and pause_event (Event, inverted
+    "set means running") behind natural pause()/resume()/is_paused()
+    calls. Passed to the generation pipeline so it doesn't need a
+    back-reference to the tkinter App.
+    """
+
+    def __init__(self):
+        self._cancelled = False
+        self._not_paused = threading.Event()
+        self._not_paused.set()
+
+    def reset(self):
+        """Clear cancel and resume. Called at the start of each job."""
+        self._cancelled = False
+        self._not_paused.set()
+
+    def cancel(self):
+        """Request cancellation. Also unblocks any pause so cancel proceeds."""
+        self._cancelled = True
+        self._not_paused.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def pause(self):
+        self._not_paused.clear()
+
+    def resume(self):
+        self._not_paused.set()
+
+    def is_paused(self) -> bool:
+        return not self._not_paused.is_set()
+
+    def wait_if_paused(self):
+        self._not_paused.wait()
+
+
 # ── GUI ───────────────────────────────────────────────────────────
 
 class TTSBookApp:
@@ -474,9 +515,7 @@ class TTSBookApp:
         )
 
         self.model = None
-        self.cancel_flag = False
-        self.pause_event = threading.Event()
-        self.pause_event.set()  # not paused initially
+        self.cancel_token = CancelToken()
         self._source_path = None
         self._play_proc = None
         self._ref_proc = None
@@ -1657,8 +1696,7 @@ class TTSBookApp:
         self._log(f"=== Batch processing {len(pending)} items ===", "info")
         self._log(f"  Items: {', '.join(q['file_name'] for q in pending)}", "info")
 
-        self.cancel_flag = False
-        self.pause_event.set()
+        self.cancel_token.reset()
         self._batch_running = True
         self._lock_ui(batch=True)
         self.pause_btn.config(state="normal")
@@ -1677,13 +1715,13 @@ class TTSBookApp:
         processed = 0
 
         while True:
-            if self.cancel_flag:
+            if self.cancel_token.cancelled:
                 self.root.after(0, lambda: self._log("Batch cancelled by user.", "warn"))
                 break
 
             # Honour pause between items (not just between chunks inside _do_generate)
-            self.pause_event.wait()
-            if self.cancel_flag:
+            self.cancel_token.wait_if_paused()
+            if self.cancel_token.cancelled:
                 self.root.after(0, lambda: self._log("Batch cancelled by user.", "warn"))
                 break
 
@@ -1750,7 +1788,7 @@ class TTSBookApp:
                     self._save_batch_queue()
                     if self.auto_mp3.get():
                         self.root.after(0, lambda p=output_path: self._auto_convert(p))
-                elif self.cancel_flag:
+                elif self.cancel_token.cancelled:
                     item["status"] = "pending"  # keep for resume
                     self._log(f"  ⏸ Cancelled (partial state saved)", "warn")
                     break
@@ -1759,7 +1797,7 @@ class TTSBookApp:
                 item["error"] = str(e)
                 self._log(f"  ✗ Error: {e}", "error")
                 self._save_batch_queue()
-                if self.cancel_flag:
+                if self.cancel_token.cancelled:
                     break
 
             self.root.after(0, self._refresh_batch_tree)
@@ -2454,8 +2492,7 @@ class TTSBookApp:
                     "Stop generation and exit?\n"
                     "(Partial progress is saved and can be resumed.)"):
                 return
-            self.cancel_flag = True
-            self.pause_event.set()  # unblock if currently paused
+            self.cancel_token.cancel()
         try:
             cfg = _load_config()
             cfg["instance_count"] = max(0, cfg.get("instance_count", 1) - 1)
@@ -2495,26 +2532,23 @@ class TTSBookApp:
         self.text_area.insert("insert", f" {tag} ")
 
     def _cancel(self):
-        self.cancel_flag = True
-        self.pause_event.set()  # unblock pause so cancel proceeds
+        self.cancel_token.cancel()
         self.status.config(text="Cancelling…", foreground="orange")
         self._log("Cancel requested — finishing current chunk…", "warn")
 
     def _toggle_pause(self):
-        if self.pause_event.is_set():
-            # Currently running → pause
-            self.pause_event.clear()
-            self.pause_btn.config(text="Resume")
-            self.batch_pause_btn.config(text="Resume")
-            self.status.config(text="Paused", foreground="orange")
-            self._log("⏸ Paused", "warn")
-        else:
-            # Currently paused → resume
-            self.pause_event.set()
+        if self.cancel_token.is_paused():
+            self.cancel_token.resume()
             self.pause_btn.config(text="Pause")
             self.batch_pause_btn.config(text="Pause")
             self.status.config(text="Generating…", foreground="black")
             self._log("▶ Resumed", "info")
+        else:
+            self.cancel_token.pause()
+            self.pause_btn.config(text="Resume")
+            self.batch_pause_btn.config(text="Resume")
+            self.status.config(text="Paused", foreground="orange")
+            self._log("⏸ Paused", "warn")
 
     def _play(self):
         if self._play_proc and self._play_proc.poll() is None:
@@ -2764,8 +2798,7 @@ class TTSBookApp:
         self.progress.config(value=0)
         self.status.config(text="Resuming…" if resume else "Generating…", foreground="black")
 
-        self.cancel_flag = False
-        self.pause_event.set()
+        self.cancel_token.reset()
         self._gen_running = True
         t = threading.Thread(target=self._generate_thread,
                              args=(text, resume, job_dir, state, settings_snap), daemon=True)
@@ -3156,17 +3189,17 @@ class TTSBookApp:
         try:
             for i, chunk in enumerate(chunks):
                 # Check cancel FIRST, before pause wait
-                if self.cancel_flag:
+                if self.cancel_token.cancelled:
                     self.root.after(0, lambda: self.out_label.config(
                         text=f"Partial: {len(completed)}/{total} chunks saved in {jd}", foreground="orange"))
                     self._log(f"Cancelled at chunk {i+1}/{total}", "warn")
                     return None
 
                 # Wait if paused
-                self.pause_event.wait()
+                self.cancel_token.wait_if_paused()
 
                 # Re-check cancel after un-pausing
-                if self.cancel_flag:
+                if self.cancel_token.cancelled:
                     self.root.after(0, lambda: self.out_label.config(
                         text=f"Partial: {len(completed)}/{total} chunks saved in {jd}", foreground="orange"))
                     self._log(f"Cancelled at chunk {i+1}/{total}", "warn")
@@ -3346,7 +3379,7 @@ class TTSBookApp:
                         f" | {proc_mb/1024:.1f} GB RSS, {free_mb/1024:.1f} GB free",
                         "chunk")
 
-            if self.cancel_flag:
+            if self.cancel_token.cancelled:
                 self.root.after(0, lambda: self.out_label.config(
                     text=f"Partial: {len(completed)}/{total} chunks saved in {jd}", foreground="orange"))
                 self._log(f"Cancelled after {len(completed)}/{total} chunks", "warn")
