@@ -43,6 +43,7 @@ from tts_books.memory.pruning import do_prune, mem_rss_mb
 from tts_books.quality.garbled import is_chunk_garbled
 from tts_books.quality.whisper_backend import whisper as _whisper
 from tts_books.generation.chunking import split_text
+from tts_books.io.audio_io import wav_to_mp3
 from tts_books.generation.stitching import crossfade_chunks, remove_dc_offset
 from tts_books.io.text_extract import load_text_file
 from tts_books.paths import QUEUE_PATH as BATCH_QUEUE_PATH
@@ -2383,10 +2384,7 @@ class TTSBookApp:
         self.mp3_btn.config(state="disabled")
         self.root.update_idletasks()
         try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", outpath, "-b:a", "192k", mp3path],
-                check=True, capture_output=True
-            )
+            wav_to_mp3(outpath, mp3path)
             self.status.config(text=f"MP3 saved: {mp3path}", foreground="green")
             self._log(f"MP3: {mp3path}", "success")
         except subprocess.CalledProcessError as e:
@@ -2406,10 +2404,7 @@ class TTSBookApp:
         try:
             self.status.config(text="Auto-converting to MP3…", foreground="black")
             self.root.update_idletasks()
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", wav_path, "-b:a", "192k", mp3path],
-                check=True, capture_output=True
-            )
+            wav_to_mp3(wav_path, mp3path)
             self._log(f"Auto MP3: {mp3path}", "success")
         except subprocess.CalledProcessError as e:
             self._log(f"Auto MP3 failed: {e.stderr.decode().strip()[-200:]}", "error")
