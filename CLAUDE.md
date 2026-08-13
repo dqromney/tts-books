@@ -2,197 +2,60 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What this repo is
+## Orientation
 
-A personal toolbox for CPU-only text-to-speech audiobook generation using **Chatterbox Turbo TTS**. The machine is a ThinkPad P51 (Xeon E3-1505M v6, 62 GB RAM). The Quadro M2200 GPU has only 4 GB VRAM — too small for the model — so all inference runs on CPU. Every script forces `CUDA_VISIBLE_DEVICES=""`.
+Personal toolbox for CPU-only text-to-speech audiobook generation using **Chatterbox Turbo TTS**. The project is currently a flat set of scripts — no `src/` package yet — with a large single-file tkinter GUI (`tts_book_gui.py`, ~170 KB, ~2000+ lines) as the primary tool.
 
-The virtual environment lives at `~/chatterbox-venv/`. All Python tools must be run inside it.
+**Read `docs/CLAUDE.md` before non-trivial edits to `tts_book_gui.py`.** It documents the thread model, chunk/resume system, batch queue persistence, garbled-chunk detection, archive/rework flow, memory-management tiers, settings sync, and the two Chatterbox library patches that must be reapplied after upgrades. Do not duplicate that content here — treat it as authoritative for internals.
 
-## Launching the apps
+`docs/REFACTOR-PLAN.md` is a *sketch*, not implemented. If asked to "refactor to `src/`", "convert to a package", or "add tests", follow that plan (Phase 1 → 5 → 2 → 3 → 4 → 6 → 7) rather than inventing structure.
+
+## Environment assumptions
+
+- Python 3.12 in a venv at `~/chatterbox-venv/` (not `.venv/` in the repo — the `.venv/` here is a JetBrains artifact). All Python invocations must be inside that venv.
+- CPU-only inference: every launcher exports `CUDA_VISIBLE_DEVICES=""`. Do not add GPU code paths; the target machine's GPU has too little VRAM.
+- System deps: `ffmpeg`, `yt-dlp`, and optionally `libjemalloc2` (memory-management tier 2 — the launcher `LD_PRELOAD`s it if present).
+- Runtime state files (`tts-book.config`, `tts-book.queue.json`, `tts-pronunciation.json`) and voice references (`~/voice-samples/`), books (`~/books/`), and output (`~/tts_output/`) live in `$HOME`, not the repo. They are gitignored.
+
+## Repo-vs-runtime path discrepancy (important)
+
+`scripts/tts-book.sh` and `scripts/start-tts.sh` currently hardcode `$HOME/bin/tts_book_gui.py` and `$HOME/bin/gradio_tts_turbo_app.py` as the launch target — **not** the copies in this repo. In practice the user runs from `~/bin/` copies while editing here, then syncs. When editing the launcher scripts, preserve this until the Phase 1/5 refactor lands (which switches them to installed entry points).
+
+## Common commands
+
+Assume the venv is already activated (`source ~/chatterbox-venv/bin/activate`).
 
 ```bash
-~/bin/tts-book.sh        # tkinter desktop GUI (primary tool)
-~/bin/start-tts.sh       # Gradio web interface (alternative)
+# Lint / format (config in pyproject.toml — line-length 100, ruff selects E,F,W,I,UP,B,SIM, ignores E501)
+ruff check .
+ruff check --fix .
+black .
+
+# Tests (tests/ is a placeholder — currently only .gitkeep)
+pytest
+pytest tests/test_chunking.py            # single file
+pytest tests/test_chunking.py::test_name # single test
+pytest -k "chunking and not slow"        # keyword filter
+pytest -m "not slow"                     # skip slow-marked (Whisper-dependent) tests once they exist
+
+# Launch (from repo — note the ~/bin path caveat above)
+./scripts/tts-book.sh     # tkinter GUI
+./scripts/start-tts.sh    # Gradio web UI
 ```
 
-Both scripts activate the venv before launching their respective Python apps.
+## Repository layout at a glance
 
-## Key files
+- `tts_book_gui.py` — main tkinter GUI. Everything of substance lives here.
+- `gradio_tts_turbo_app.py` — simpler web UI, no resume support.
+- `capture_mol.py`, `capture_zos.py` — Royal Road chapter scrapers. Pattern: `fetch()` → `extract()` → follow `next_url`. Copy and edit `start_url`/`output_file` to add a new fiction.
+- `scripts/` — bash wrappers. `tts-book.sh` sets the memory-management env vars (`MALLOC_MMAP_THRESHOLD_`, `MALLOC_TRIM_THRESHOLD_`, jemalloc `LD_PRELOAD`) — do not strip these.
+- `tts-pronunciation.example.json` — sample seed for the runtime pronunciation dictionary.
+- `docs/CLAUDE.md` — detailed internals (authoritative).
+- `docs/REFACTOR-PLAN.md` — future package refactor (not started).
 
-| File | Role |
-|------|------|
-| `tts_book_gui.py` | Main tkinter GUI — single Python file, ~2000+ lines |
-| `gradio_tts_turbo_app.py` | Gradio web alternative — simpler, no resume support |
-| `tts-book.config` | JSON config (paths + instance count), written alongside the script |
-| `tts-pronunciation.json` | Pronunciation substitution dictionary (word→replacement); created on first Add |
-| `voice-sample` | Bash script: extracts voice clips from YouTube via yt-dlp |
-| `tts-enhance.sh` | ffmpeg EQ + compression + WAV→MP3 conversion |
-| `wav2mp3.sh` | Bare WAV→MP3 at 192k (no processing) |
-| `wav-join.sh` | Concatenates multiple WAV files via ffmpeg concat demuxer |
-| `capture_mol.py` | Royal Road chapter scraper — Mother of Learning |
-| `capture_zos.py` | Royal Road chapter scraper — Zenith of Sorcery |
+## Editing guidelines specific to this repo
 
-Voice reference WAVs live in `~/voice-samples/` (canonical) and in `~/bin/*.wav` (legacy copies).  
-Books (plain text) live in `~/books/`.  
-Generated audio lands in `~/tts_output/`.
-
-## tts_book_gui.py architecture
-
-### Thread model
-All TTS generation runs in a daemon thread (`_generate_thread` → `_do_generate`). The main thread is tkinter's event loop. Cross-thread UI updates **must** use `root.after(0, lambda: ...)` — never call tkinter widgets directly from the generation thread.
-
-### Chunk/resume system
-Text is split by `split_text()` into chunks (default 200 chars, configurable). Each chunk is generated and saved individually to `~/tts_output/jobs/<md5hash>/chunk_NNNNNN.wav`. A `state.json` checkpoint is written after each chunk. On completion, chunks are concatenated with 0.3 s silence between them and the job directory is **archived** to `~/tts_output/archive/<hash>/` (not deleted). A `generation.log` is saved to the archive. If any chunks remained garbled after all retries, a `rework.json` listing those chunks is also written.
-
-Resume works by two-step lookup:
-1. MD5 hash of current text → job directory (normal path)
-2. `_startup_job` fallback (set at startup by `_scan_partial_jobs`) for cases where reconstructed text hashes differently than the original
-
-**Critical**: when resuming, always use `state["chunks"]` from disk — never re-split the text. Re-splitting produces different chunk boundaries and misaligns the completed-set indices.
-
-### Config system
-`tts-book.config` (JSON, lives next to the script in `~/bin/`) stores directory paths and an `instance_count`. The count is incremented at launch and decremented at clean exit via `WM_DELETE_WINDOW`. The Settings dialog reads the live count from disk (not memory) to detect concurrent instances and block changes when >1 is open.
-
-### Batch queue persistence
-`tts-book.queue.json` (alongside the config) saves the batch queue to disk on every add/remove/clear/status-change. On startup, `_load_batch_queue()` restores the queue. Items stuck in "processing" state (from a crash) are reset to "pending". The `_batch_next_id` counter is persisted so IDs don't collide across restarts.
-
-Add/Remove/Clear buttons (`batch_add_btn`, `batch_remove_btn`, `batch_clear_btn`) are stored as instance vars and remain **enabled during batch runs** to allow live queue management. `_remove_from_batch()` skips items with `status == "processing"`. `_clear_batch()` only removes non-processing items.
-
-### Auto MP3 conversion
-The Advanced Options panel has an "Auto-convert to MP3" checkbox (`self.auto_mp3`). When checked, every completed generation (single-file or batch item) runs `ffmpeg -b:a 192k` on the output WAV. The MP3 lands alongside the WAV with the same stem. Silent on failure — logs to the detail pane.
-
-### UI locking
-`self._lockable` is a list of all input widgets populated during `_build_ui()`. `_lock_ui()` disables everything in that list plus the voice combobox. `_unlock_ui()` re-enables them, restoring the combobox to `"readonly"` state. Lock/unlock is called at the start and end of generation (including cancel and error paths).
-
-The **Play Voice button (`play_ref_btn`) is never disabled** during generation — it is not included in `_lockable` and `_lock_ui()` does not touch it. `_play_ref()` does not guard on `_gen_running`.
-
-`self._gen_running` is initialized to `False` in `__init__` (required to avoid AttributeError on VoxCeleb1 download before any generation has started).
-
-Voice selection uses the voice combobox and Browse VoxCeleb1 only. The former "Choose .wav" file-picker button has been removed.
-
-### Text preprocessing
-`split_text()` in the module: splits on sentence endings and (optionally) clause endings, groups sentences greedily up to `max_chars`, hard-splits oversized sentences at comma/semicolon/word boundaries. `_SEPARATOR_RE` strips decorative separator lines (`====`, `----`, `****`, etc.) from paragraphs before chunking.
-
-### Pronunciation dictionary
-`PRON_DICT_PATH = ~/bin/tts-pronunciation.json` stores word-to-replacement mappings as a flat JSON object. Module-level functions:
-
-- `_load_pron_dict()` — reads the file (returns `{}` if missing)
-- `_save_pron_dict(d)` — writes the file atomically
-- `apply_pronunciation(text, d)` — applies all substitutions (whole-word, case-insensitive)
-
-`apply_pronunciation()` is called on the full text before `split_text()` in `_do_generate()`, but only for fresh (non-resume) generations.
-
-The "Pronunciation..." button in the controls row opens `_open_pron_dict()` — a Toplevel dialog with a Treeview and Add/Update/Remove controls. This button is **not** in `_lockable`, so the dialog remains accessible during generation.
-
-### Garbled chunk detection and retry
-`MAX_CHUNK_RETRIES = 3` (module-level constant).
-
-`_is_chunk_garbled(wav_path, text)` runs six checks in order:
-
-1. **Duration heuristic** — flags if `duration < len(text) / 25.0` (cutoff/silence) or `duration > len(text) / 3.5` (repetition loop).
-2. **Word overlap** (faster-whisper tiny.en) — fraction of expected words appearing in transcription; < 45% = garbled.
-3. **Word-count ratio** (fallback) — transcribed words / expected words < 0.5 = garbled.
-4. **Unrecognized tail** — last transcribed word ends > 2.5 s before audio ends (whisper stopped, noise follows).
-5. **Tail word check** — last 6 transcribed words < 35% match against expected word set (whisper transcribed garble as wrong words).
-6. **Word stutter** — consecutive identical tokens in transcription not expected to repeat.
-
-After each chunk is saved, a retry loop re-generates with a fresh randomized `torch.manual_seed()` if flagged as garbled, up to `MAX_CHUNK_RETRIES` times. **The initial generation is saved as a `.best` backup before retrying.** If a retry comes back clean it wins; if all retries are also garbled, the `.best` (first/most-confident) attempt is restored. Chunks that exhaust all retries are recorded in `garbled_chunks` and written to `rework.json` in the archive.
-
-### Archive and rework system
-`ARCHIVE_DIR = ~/tts_output/archive/` (module-level constant, also stored as `self._archive_dir`).
-
-When a job completes successfully, `_archive_job(jd, garbled_chunks, output_path)` moves the job directory to `~/tts_output/archive/<hash>/`, writes `generation.log` (full plain-text log buffer), and writes `rework.json` if any chunks were garbled after all retries.
-
-`rework.json` format:
-```json
-{
-  "output_path": "/home/.../abish-v3.wav",
-  "archived": "2026-07-01T09:00:00",
-  "rework_chunks": [
-    {"index": 7, "filename": "chunk_000007.wav", "reason": "STT: tail garbled (25%)", "text": "…"}
-  ]
-}
-```
-
-The **Rework… button** (Single File controls row) shows a pending count (`Rework (2)…`) when archived jobs have unresolved garbled chunks. Clicking it opens a dialog listing all such jobs. Selecting one and clicking **Process Rework** copies the archive back to `jobs/`, removes the garbled WAV files, patches `state.json` to remove their indices from `completed`, deletes the archive entry, and resumes generation — regenerating only the missing chunks then re-concatenating everything. On completion the job is re-archived cleanly.
-
-`_log_buffer` (instance list) captures every log line as plain text so `_archive_job` can write `generation.log` without accessing the tkinter widget from a background thread.
-
-### Settings sync
-`_apply_settings_to_ui(settings)` is called in three places to keep the Advanced Options panel in sync:
-
-- **Partial job restore** (`_restore_partial_job`) — Advanced Options update immediately when a partial job is found at startup or selected from the picker.
-- **Resume confirmation** (`_start_generate`) — settings update before the UI locks when the user clicks Yes to resume a found partial job.
-- **Batch item click** (`_on_batch_select`, bound to `<<TreeviewSelect>>` on the batch Treeview) — clicking any batch queue row reflects that item's settings and voice in the UI.
-- **Batch processing** — already called at the start of each batch item (unchanged).
-
-### Memory management
-
-Three-tier strategy to prevent glibc malloc arena fragmentation from exhausting 62 GB RAM across hundreds of chunks:
-
-**Tier 1 — glibc tuning (tts-book.sh):** `MALLOC_MMAP_THRESHOLD_=131072` makes glibc use `mmap` for allocations > 128 KB so each large tensor can be freed individually to the OS rather than held in a thread-local arena. `MALLOC_TRIM_THRESHOLD_=65536` makes `malloc_trim` more aggressive.
-
-**Tier 2 — jemalloc (tts-book.sh):** If `libjemalloc2` is installed (`sudo apt install libjemalloc2`), the launch script `LD_PRELOAD`s jemalloc, which handles fragmentation vastly better than glibc. Falls back silently if not installed.
-
-**Tier 3 — periodic model reload (GUI checkbox):** The Advanced Options panel has a "Reload model every N chunks" spinbox (0 = disabled). When set (e.g., 100), the model is destroyed and recreated every N chunks during generation. This dumps all model memory at once, giving the allocator a clean heap. Costs ~30s per reload. Best used as a last resort if tiers 1+2 aren't enough.
-
-**Per-chunk (unchanged):** `gc.collect()` + `ctypes.CDLL("libc.so.6").malloc_trim(0)` after each chunk. Whisper model unloaded/reloaded every 25 chunks. Auto-prune when free RAM drops below 8 GB.
-
-### Crossfade stitching
-
-Module-level `_crossfade_chunks(wavs, sr, crossfade_ms=50)` replaces silence-gap concatenation with equal-power crossfades. Each junction overlaps `crossfade_ms` of audio, applying cos² fade-out to the outgoing chunk and sin² fade-in to the incoming chunk, then summing them. This eliminates the audible clicks/pops of hard silence-gap joins and produces seamless audiobook narration.
-
-Controlled by the "Crossfade (ms, 0=off)" spinbox in Advanced Options (default 50 ms). Set to 0 to revert to the old 0.3s silence-gap concatenation.
-
-### DC offset removal
-
-`_remove_dc_offset(audio, sr)` applies a 2nd-order high-pass Butterworth filter at 15 Hz (zero-phase via `filtfilt`) to the final concatenated output before saving. This strips out any DC bias introduced per-chunk by the TTS model, which otherwise causes low-frequency thumps at chunk boundaries. Requires scipy (already in the venv); silently passes through if scipy is unavailable.
-
-### Voice combobox + VoxCeleb1
-`_populate_voice_combo()` scans `self._voice_samples_dir` for `*.wav` files and populates a `ttk.Combobox`. `_browse_dataset()` opens a Toplevel that downloads `metadata.csv` from `sdialog/voices-voxceleb1` on HuggingFace Hub (using `hf_hub_download` from `huggingface_hub` v1.19+; `datasets` is **not** installed). Downloads individual speaker WAVs on demand and copies to `voice_samples_dir`.
-
-## Chatterbox library patches
-
-These files under `~/chatterbox-venv/lib/python3.12/site-packages/chatterbox/` have been patched and differ from the upstream release. Do not overwrite them with a package upgrade without re-applying these changes.
-
-### `tts_turbo.py` — `generate()`
-
-- `prepare_conditionals()` is called **once per job** (before the chunk loop in `tts_book_gui.py`). Each subsequent chunk call passes `audio_prompt_path=None` so the cached `self.conds` is reused without re-loading the reference WAV on every chunk.
-- `generate()` now accepts two new keyword arguments: `max_gen_len=None` (defaults internally to `max(2000, len(text)*25)`) and `no_repeat_ngram_size=6`. Both are forwarded to `inference_turbo()`. (Lowered from 8 to 6 on 2026-07-23 after observing 6-token phrase loops slipping past the 8-gram guard.)
-
-### `models/t3/t3.py` — `inference_turbo()`
-
-- Default value of `max_gen_len` raised from **1000 → 4000** to prevent truncated output on longer chunks.
-- `NoRepeatNGramLogitsProcessor(no_repeat_ngram_size)` added to the logits processor list. This prevents speech-token n-gram repetitions that caused phrase echoing in longer passages. Default n=6 (was 8 pre-2026-07-23).
-
-## Royal Road chapter capture pattern
-
-`capture_mol.py` and `capture_zos.py` share the same structure: `fetch()` → `extract()` → follow `next_url`. For ad-hoc capture of a new fiction, copy either file, change `start_url` and `output_file`, and run directly. For sites that return 403 to simple requests, use `curl` with Firefox User-Agent headers piped to a BeautifulSoup parser (see the Unconquered Tower session for the exact headers).
-
-Chapter separators in scraped text (`='*60`) are automatically skipped by `_SEPARATOR_RE` in `split_text()`.
-
-## Running in WSL (Windows Subsystem for Linux)
-
-Tkinter requires an X11 display server. Two approaches:
-
-**WSLg (WSL2 + Windows 11 / recent Win10 — automatic):** WSLg is a built-in Wayland/X11 compositor; GUI apps and audio (`paplay`) work with no setup. Verify with `echo $DISPLAY` (should print `:0`) and `ls /mnt/wslg/`.
-
-**Third-party X server (older WSL or WSL1):** Install VcXsrv, X410, or MobaXterm on Windows, then set in WSL:
-```bash
-export DISPLAY=$(grep nameserver /etc/resolv.conf | awk '{print $2}'):0
-```
-Add to `~/.bashrc` to persist. Audio requires a separate PulseAudio bridge to Windows (WSLg handles this automatically).
-
-`CUDA_VISIBLE_DEVICES=""` in `tts-book.sh` is already correct for WSL.
-
-## Dependencies (inside ~/chatterbox-venv)
-
-- `chatterbox` — Chatterbox Turbo TTS model (patched — see above)
-- `torch`, `torchaudio` — inference + audio I/O
-- `fitz` (PyMuPDF) — PDF text extraction
-- `ebooklib`, `beautifulsoup4` — EPUB extraction
-- `huggingface_hub` — VoxCeleb1 dataset browser
-- `gradio` — web UI alternative
-- `ffmpeg` (system) — audio post-processing, WAV joining, MP3 conversion
-- `paplay` (system, PipeWire/PulseAudio) — in-app audio playback
-- `yt-dlp` (system) — voice sample extraction from YouTube
+- **Never call tkinter widgets from the generation thread.** All UI updates from `_do_generate` and callees must go through `root.after(0, lambda: ...)`. See `docs/CLAUDE.md` "Thread model".
+- **When resuming a job, use `state["chunks"]` from disk; never re-split the text.** Re-splitting produces different boundaries and desyncs the `completed` set. See "Chunk/resume system".
+- **Chatterbox patches live in the venv's `site-packages/chatterbox/`**, not in this repo. If a change to `tts_book_gui.py` assumes patched behavior (cached conditionals, `max_gen_len`/`no_repeat_ngram_size` kwargs, raised `max_gen_len` default, `NoRepeatNGramLogitsProcessor`), keep it consistent with what `docs/CLAUDE.md` "Chatterbox library patches" describes.
+- Dependencies are currently declared in `requirements.txt`, not `pyproject.toml` (a deliberate deferral until the package refactor — do not migrate them piecemeal).

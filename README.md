@@ -8,7 +8,7 @@ Runs entirely on CPU — no GPU required. Designed for machines with ample RAM (
 
 - **Chunked generation with resume** — text is split into ~200-char chunks, each saved individually with a state checkpoint. Cancelled or crashed jobs resume from the last completed chunk.
 - **Batch queue** — persistent queue of jobs; add/remove/reorder items while a run is in progress.
-- **Garbled-chunk detection** — six-check heuristic (duration, word overlap via Whisper, unrecognized tail, stutter, etc.) with up to 3 retry attempts per chunk using fresh random seeds.
+- **Garbled-chunk detection** — ten-check heuristic (duration, Whisper word overlap, word-count ratio, unrecognized tail, tail-word mismatch, stutter, missing final content word, phrase repetition loop, anaphoric over-repetition, single-source phrase spoken twice) with up to 3 retry attempts per chunk using fresh random seeds.
 - **Rework workflow** — jobs with unresolved garbled chunks are archived with a `rework.json`. The GUI's Rework button lists pending jobs and re-generates only the flagged chunks.
 - **Crossfade stitching** — equal-power crossfades (default 50 ms) between chunks, eliminating audible clicks at chunk boundaries.
 - **DC-offset removal** — 2nd-order high-pass at 15 Hz on the final output.
@@ -20,22 +20,29 @@ Runs entirely on CPU — no GPU required. Designed for machines with ample RAM (
 ## Repository layout
 
 ```
-tts_book_gui.py           Main tkinter GUI (~170 KB, single file)
-gradio_tts_turbo_app.py   Alternative Gradio web UI (simpler, no resume)
-capture_mol.py            Royal Road scraper — Mother of Learning
-capture_zos.py            Royal Road scraper — Zenith of Sorcery
+tts_book_gui.py                    Main tkinter GUI (~170 KB, single file)
+gradio_tts_turbo_app.py            Alternative Gradio web UI (simpler, no resume)
+capture_mol.py                     Royal Road scraper — Mother of Learning
+capture_zos.py                     Royal Road scraper — Zenith of Sorcery
+tts-pronunciation.example.json     Sample pronunciation dictionary
 
-tts-book.sh               Launcher for the tkinter GUI (sets memory flags)
-start-tts.sh              Launcher for the Gradio web UI
-tts-watchdog.sh           Watchdog for long-running TTS jobs
+scripts/
+  tts-book.sh                      Launcher for the tkinter GUI (sets memory flags)
+  start-tts.sh                     Launcher for the Gradio web UI
+  tts-watchdog.sh                  Watchdog for long-running TTS jobs
+  tts-enhance.sh                   ffmpeg EQ + compression + WAV→MP3 conversion
+  wav2mp3.sh                       Bare WAV→MP3 at 192k
+  wav-join.sh                      Concatenate WAV files via ffmpeg concat demuxer
+  voice-sample                     Extract voice reference clips from YouTube via yt-dlp
 
-tts-enhance.sh            ffmpeg EQ + compression + WAV→MP3 conversion
-wav2mp3.sh                Bare WAV→MP3 at 192k
-wav-join.sh               Concatenate WAV files via ffmpeg concat demuxer
-voice-sample              Extract voice reference clips from YouTube via yt-dlp
+docs/
+  CLAUDE.md                        Detailed architecture / internals notes
+  REFACTOR-PLAN.md                 Roadmap: convert to installable package
 
-tts-pronunciation.example.json   Sample pronunciation dictionary
-CLAUDE.md                 Detailed architecture / internals notes
+tests/                             (placeholder — no tests yet)
+
+pyproject.toml                     Project metadata + tool config (black, ruff, pytest)
+requirements.txt                   Runtime dependencies
 ```
 
 ## Setup
@@ -65,8 +72,8 @@ CLAUDE.md                 Detailed architecture / internals notes
 ## Running
 
 ```bash
-./tts-book.sh        # tkinter desktop GUI (primary tool)
-./start-tts.sh       # Gradio web interface (alternative)
+./scripts/tts-book.sh    # tkinter desktop GUI (primary tool)
+./scripts/start-tts.sh   # Gradio web interface (alternative)
 ```
 
 Both scripts activate the venv, force CPU-only inference (`CUDA_VISIBLE_DEVICES=""`), and launch the corresponding Python app.
@@ -75,7 +82,7 @@ Voice reference WAVs are expected in `~/voice-samples/`. Books (plain text, PDF,
 
 ## Chatterbox library patches
 
-`tts_book_gui.py` relies on two upstream patches to the `chatterbox` package in the venv. Details are documented in [CLAUDE.md](CLAUDE.md) under "Chatterbox library patches" — reapply these after upgrading the package:
+`tts_book_gui.py` relies on two upstream patches to the `chatterbox` package in the venv. Details are documented in [docs/CLAUDE.md](docs/CLAUDE.md) under "Chatterbox library patches" — reapply these after upgrading the package:
 
 - `tts_turbo.py::generate()` — cache conditionals across chunks; add `max_gen_len` and `no_repeat_ngram_size` kwargs
 - `models/t3/t3.py::inference_turbo()` — raise `max_gen_len` default to 4000; add `NoRepeatNGramLogitsProcessor` (default n=6)

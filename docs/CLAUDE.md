@@ -87,14 +87,18 @@ The "Pronunciation..." button in the controls row opens `_open_pron_dict()` — 
 ### Garbled chunk detection and retry
 `MAX_CHUNK_RETRIES = 3` (module-level constant).
 
-`_is_chunk_garbled(wav_path, text)` runs six checks in order:
+`_is_chunk_garbled(wav_path, text)` runs ten checks in order (the function's own docstring is stale — it says "four" but the body has ten):
 
 1. **Duration heuristic** — flags if `duration < len(text) / 25.0` (cutoff/silence) or `duration > len(text) / 3.5` (repetition loop).
-2. **Word overlap** (faster-whisper tiny.en) — fraction of expected words appearing in transcription; < 45% = garbled.
+2. **Word overlap** (faster-whisper tiny.en) — fraction of expected words appearing in transcription; < 45% = garbled. Hyphenated words are excluded from the expected set because Whisper transcribes the *sound* of a pronunciation substitution ("ay-bish"), not its spelling.
 3. **Word-count ratio** (fallback) — transcribed words / expected words < 0.5 = garbled.
 4. **Unrecognized tail** — last transcribed word ends > 2.5 s before audio ends (whisper stopped, noise follows).
 5. **Tail word check** — last 6 transcribed words < 35% match against expected word set (whisper transcribed garble as wrong words).
-6. **Word stutter** — consecutive identical tokens in transcription not expected to repeat.
+6. **Word stutter** — consecutive identical tokens in transcription not expected to repeat consecutively in the source.
+7. **Final content word absent** — the last unhyphenated ≥5-char word in the source doesn't appear anywhere in the transcript, unless its vowel ratio suggests Whisper can't spell it (proper nouns, archaic terms).
+8. **Phrase repetition loop** — a 5-gram in the transcription appears twice but never appears in the source (model looped a clause).
+9. **Anaphoric over-repetition** — a 5-gram appears more times in the transcription than in the source (catches loops of a legitimately-repeating phrase like Holland-style anaphora that check 8 misses).
+10. **Single-source phrase spoken twice** — a 6-gram appears exactly once in the source but two or more times in the transcription (classic "the road went through the dust, as all roads went through the dust…" loop that checks 8 and 9 both miss).
 
 After each chunk is saved, a retry loop re-generates with a fresh randomized `torch.manual_seed()` if flagged as garbled, up to `MAX_CHUNK_RETRIES` times. **The initial generation is saved as a `.best` backup before retrying.** If a retry comes back clean it wins; if all retries are also garbled, the `.best` (first/most-confident) attempt is restored. Chunks that exhaust all retries are recorded in `garbled_chunks` and written to `rework.json` in the archive.
 
