@@ -31,17 +31,22 @@ import torchaudio
 import fitz  # pymupdf
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
+from tts_books.paths import (
+    APP_CONFIG_PATH as CONFIG_PATH,
+    PRON_DICT_PATH,
+    QUEUE_PATH as BATCH_QUEUE_PATH,
+)
+
 DEVICE = "cpu"
 MAX_CHARS_PER_CHUNK = 200   # default; override via UI
 
-# Default paths — overridden by config file if present
+# Default paths — overridden by config file if present. Unlike the state
+# files above (which now live under $XDG_CONFIG_HOME/tts-books/ per
+# paths.py), these are user-configurable via the Settings dialog and
+# default to well-known $HOME locations for backward compatibility.
 VOICE_SAMPLES_DIR = os.path.expanduser("~/voice-samples")
 JOBS_DIR = os.path.expanduser("~/tts_output/jobs")
 OUTPUT_DIR = os.path.expanduser("~/tts_output")
-
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts-book.config")
-BATCH_QUEUE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts-book.queue.json")
-PRON_DICT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts-pronunciation.json")
 MAX_CHUNK_RETRIES = 3
 _PRUNE_THRESHOLD_GB = 12.0  # auto-prune warning threshold (system free RAM)
 
@@ -3951,6 +3956,12 @@ def main():
     parser.add_argument("--auto-resume", action="store_true",
                         help="Auto-start batch processing if pending items exist")
     args = parser.parse_args()
+
+    # Copy pre-Phase-2 state files from ~/bin/ to $XDG_CONFIG_HOME/tts-books/
+    # on first launch. No-op after that.
+    from tts_books.paths import migrate_legacy
+    for legacy, new in migrate_legacy():
+        print(f"Migrated {legacy} -> {new}")
 
     root = tk.Tk()
     app = TTSBookApp(root, auto_resume=args.auto_resume)
