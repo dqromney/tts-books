@@ -18,6 +18,9 @@ venv/
 env/
 ENV/
 
+# Git worktrees (per superpowers workflow)
+.worktrees/
+
 # PyCharm / JetBrains
 .idea/
 *.iml
