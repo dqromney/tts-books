@@ -36,7 +36,6 @@ MAX_CHARS_PER_CHUNK = 200   # default; override via UI
 VOICE_SAMPLES_DIR = os.path.expanduser("~/voice-samples")
 JOBS_DIR = os.path.expanduser("~/tts_output/jobs")
 OUTPUT_DIR = os.path.expanduser("~/tts_output")
-ARCHIVE_DIR = os.path.expanduser("~/tts_output/archive")
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts-book.config")
 BATCH_QUEUE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts-book.queue.json")
