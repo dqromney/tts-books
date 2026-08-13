@@ -32,15 +32,8 @@ import torchaudio
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
 from tts_books.io.text_extract import load_text_file
-from tts_books.paths import (
-    APP_CONFIG_PATH as CONFIG_PATH,
-)
-from tts_books.paths import (
-    PRON_DICT_PATH,
-)
-from tts_books.paths import (
-    QUEUE_PATH as BATCH_QUEUE_PATH,
-)
+from tts_books.paths import APP_CONFIG_PATH as CONFIG_PATH, QUEUE_PATH as BATCH_QUEUE_PATH
+from tts_books.pronunciation import apply_pronunciation, load_pron_dict, save_pron_dict
 
 DEVICE = "cpu"
 MAX_CHARS_PER_CHUNK = 200   # default; override via UI
@@ -101,51 +94,6 @@ def _save_config(cfg):
     with open(tmp, "w") as f:
         json.dump(cfg, f, indent=2)
     os.replace(tmp, CONFIG_PATH)
-
-
-def _load_pron_dict():
-    """Return {word: {"replacement": str, "enabled": bool}}.
-    Migrates the old flat {word: str} format on first read."""
-    if os.path.isfile(PRON_DICT_PATH):
-        try:
-            with open(PRON_DICT_PATH) as f:
-                raw = json.load(f)
-            migrated = {}
-            dirty = False
-            for k, v in raw.items():
-                if isinstance(v, str):
-                    migrated[k] = {"replacement": v, "enabled": True}
-                    dirty = True
-                else:
-                    migrated[k] = v
-            if dirty:
-                _save_pron_dict(migrated)
-            return migrated
-        except Exception:
-            pass
-    return {}
-
-
-def _save_pron_dict(d):
-    tmp = PRON_DICT_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(d, f, indent=2, sort_keys=True)
-    os.replace(tmp, PRON_DICT_PATH)
-
-
-def apply_pronunciation(text, pron_dict):
-    """Replace words/phrases using the pronunciation dictionary (word-boundary, case-insensitive).
-    Entries with enabled=False are silently skipped."""
-    for original, entry in pron_dict.items():
-        if isinstance(entry, dict):
-            if not entry.get("enabled", True):
-                continue
-            replacement = entry["replacement"]
-        else:
-            replacement = entry  # legacy flat format
-        pattern = r'\b' + re.escape(original) + r'\b'
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    return text
 
 
 EVENT_TAGS = [
@@ -1202,7 +1150,7 @@ class TTSBookApp:
             return
 
         # Check upfront (with pronunciation applied, matching _do_generate's hash)
-        pron_dict = _load_pron_dict()
+        pron_dict = load_pron_dict()
         found_lines = []   # items with a partial job — show reconciliation result
         no_job = []        # items with no partial job on disk
 
@@ -1774,7 +1722,7 @@ class TTSBookApp:
             try:
                 resume_job_dir, resume_state = None, None
                 item.pop("try_resume", None)  # consume flag; lookup always runs
-                _pron = _load_pron_dict()
+                _pron = load_pron_dict()
                 _rtxt = apply_pronunciation(item["text"], _pron) if _pron else item["text"]
                 resume_job_dir, resume_state = self._find_resumable_job(
                     _rtxt, _hint_hash=item.get("_job_hash"))
@@ -2167,7 +2115,7 @@ class TTSBookApp:
 
     def _open_pron_dict(self):
         """Open the pronunciation substitution dictionary editor."""
-        pron_dict = _load_pron_dict()  # {word: {"replacement": str, "enabled": bool}}
+        pron_dict = load_pron_dict()  # {word: {"replacement": str, "enabled": bool}}
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Pronunciation Dictionary")
@@ -2255,7 +2203,7 @@ class TTSBookApp:
                 messagebox.showwarning("Missing fields", "Both fields are required.", parent=dlg)
                 return
             pron_dict[word] = {"replacement": repl, "enabled": enabled_var.get()}
-            _save_pron_dict(pron_dict)
+            save_pron_dict(pron_dict)
             refresh_tree()
             word_var.set("")
             repl_var.set("")
@@ -2274,7 +2222,7 @@ class TTSBookApp:
                     cur = _entry_enabled(entry)
                     repl = _entry_repl(entry)
                     pron_dict[word] = {"replacement": repl, "enabled": not cur}
-            _save_pron_dict(pron_dict)
+            save_pron_dict(pron_dict)
             refresh_tree()
 
         def remove_selected():
@@ -2284,7 +2232,7 @@ class TTSBookApp:
             for item in sel:
                 word = tree.item(item, "values")[0]
                 pron_dict.pop(word, None)
-            _save_pron_dict(pron_dict)
+            save_pron_dict(pron_dict)
             refresh_tree()
             word_var.set("")
             repl_var.set("")
@@ -3141,7 +3089,7 @@ class TTSBookApp:
         # On resume the text is reconstructed from the saved chunks, so pronunciation
         # was already applied when the job was first created.
         if not resume:
-            pron_dict = _load_pron_dict()
+            pron_dict = load_pron_dict()
             if pron_dict:
                 text = apply_pronunciation(text, pron_dict)
 
