@@ -18,7 +18,7 @@ import json
 import hashlib
 import time
 import shutil
-from dataclasses import dataclass, asdict, fields as dataclass_fields
+from dataclasses import dataclass, asdict, field, fields as dataclass_fields
 from datetime import datetime
 from typing import Protocol
 
@@ -455,6 +455,56 @@ class Settings:
         """Build from a possibly-partial dict. Unknown keys are ignored so
         older state.json / queue files remain loadable after new fields
         are added. Missing keys fall back to dataclass defaults.
+        """
+        if not d:
+            return cls()
+        known = {f.name for f in dataclass_fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+@dataclass
+class BatchItem:
+    """One entry in the batch queue.
+
+    Wire format is a plain dict (via to_dict()/from_dict()) since the
+    queue is persisted as JSON and mutated in-place across many sites.
+    The dataclass exists as the single source of truth for field names
+    and defaults so construction can't silently drift across the three
+    call sites (_add_to_batch, _add_dir_to_batch, and the rework-add
+    flow in _open_rework_dialog).
+
+    Leading-underscore fields are runtime-computed, not user-supplied:
+    _job_hash is set by _do_generate for later resume-hint lookup,
+    _eta_str is refreshed by the progress reporter, and _text_sidecar
+    is set by _load_batch_queue when a saved sidecar text file exists.
+    """
+
+    id: int = 0
+    source_path: str | None = None
+    file_name: str = ""
+    text: str = ""
+    ref_path: str | None = None
+    voice_name: str = ""
+    settings: dict = field(default_factory=dict)
+    status: str = "pending"
+    output_path: str = ""
+    error: str = ""
+    chunks_done: int = 0
+    chunks_total: int = 0
+    gen_time: str = ""
+    _job_hash: str | None = None
+    _eta_str: str = ""
+    _text_sidecar: str | None = None
+    try_resume: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "BatchItem":
+        """Build from a possibly-partial dict. Unknown keys are ignored so
+        older queue.json files remain loadable after new fields are added.
+        Missing keys fall back to dataclass defaults.
         """
         if not d:
             return cls()
@@ -1014,18 +1064,15 @@ class TTSBookApp:
         ref = self.ref_path.get() or None
         voice_name = os.path.splitext(os.path.basename(ref))[0] if ref else "(default)"
 
-        item = {
-            "id": self._batch_next_id,
-            "source_path": self._source_path,
-            "file_name": os.path.basename(self._source_path) if self._source_path else "(pasted text)",
-            "text": text,
-            "ref_path": ref,
-            "voice_name": voice_name,
-            "settings": self._snapshot_settings(),
-            "status": "pending",
-            "output_path": "",
-            "error": "",
-        }
+        item = BatchItem(
+            id=self._batch_next_id,
+            source_path=self._source_path,
+            file_name=os.path.basename(self._source_path) if self._source_path else "(pasted text)",
+            text=text,
+            ref_path=ref,
+            voice_name=voice_name,
+            settings=self._snapshot_settings(),
+        ).to_dict()
         self._batch_next_id += 1
         self._batch_queue.append(item)
         self._reflect_batch_change()
@@ -1185,18 +1232,15 @@ class TTSBookApp:
                     text = load_text_file(path)
                     if not text.strip():
                         continue
-                    self._batch_queue.append({
-                        "id":          self._batch_next_id,
-                        "source_path": path,
-                        "file_name":   fname,
-                        "text":        text,
-                        "ref_path":    ref,
-                        "voice_name":  voice_name,
-                        "settings":    settings,
-                        "status":      "pending",
-                        "output_path": "",
-                        "error":       "",
-                    })
+                    self._batch_queue.append(BatchItem(
+                        id=self._batch_next_id,
+                        source_path=path,
+                        file_name=fname,
+                        text=text,
+                        ref_path=ref,
+                        voice_name=voice_name,
+                        settings=settings,
+                    ).to_dict())
                     self._batch_next_id += 1
                     added += 1
                 except Exception as e:
@@ -3725,18 +3769,15 @@ class TTSBookApp:
             ref         = settings.get("ref_path") or None
             voice_name  = os.path.splitext(os.path.basename(ref))[0] if ref else "(default)"
             file_name   = os.path.basename(output_path) if output_path else os.path.basename(arc)
-            item = {
-                "id":          self._batch_next_id,
-                "source_path": output_path or None,
-                "file_name":   file_name,
-                "text":        text,
-                "ref_path":    ref,
-                "voice_name":  voice_name,
-                "settings":    settings,
-                "status":      "pending",
-                "output_path": "",
-                "error":       "",
-            }
+            item = BatchItem(
+                id=self._batch_next_id,
+                source_path=output_path or None,
+                file_name=file_name,
+                text=text,
+                ref_path=ref,
+                voice_name=voice_name,
+                settings=settings,
+            ).to_dict()
             self._batch_next_id += 1
             self._batch_queue.append(item)
             self._reflect_batch_change()
