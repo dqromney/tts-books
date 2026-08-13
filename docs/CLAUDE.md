@@ -11,32 +11,32 @@ The virtual environment lives at `~/chatterbox-venv/`. All Python tools must be 
 ## Launching the apps
 
 ```bash
-~/bin/tts-book.sh        # tkinter desktop GUI (primary tool)
-~/bin/start-tts.sh       # Gradio web interface (alternative)
+./scripts/tts-book.sh        # tkinter desktop GUI (primary tool)
+./scripts/start-tts.sh       # Gradio web interface (alternative)
 ```
 
-Both scripts activate the venv before launching their respective Python apps.
+Both scripts activate the venv and exec the installed console entry points (`tts-book`, `tts-book-web`) — see Phase 1/5 of `REFACTOR-PLAN.md`. Package must be installed editable first: `pip install -e .` inside the venv.
 
 ## Key files
 
 | File | Role |
 |------|------|
-| `tts_book_gui.py` | Main tkinter GUI — single Python file, ~2000+ lines |
-| `gradio_tts_turbo_app.py` | Gradio web alternative — simpler, no resume support |
-| `tts-book.config` | JSON config (paths + instance count), written alongside the script |
+| `src/tts_books/gui.py` | Main tkinter GUI — single Python file, ~2000+ lines |
+| `src/tts_books/gradio_app.py` | Gradio web alternative — simpler, no resume support |
+| `tts-book.config` | JSON config (paths + instance count) — location currently alongside `gui.py` (Phase 2 moves it to `$XDG_CONFIG_HOME/tts-books/`) |
 | `tts-pronunciation.json` | Pronunciation substitution dictionary (word→replacement); created on first Add |
-| `voice-sample` | Bash script: extracts voice clips from YouTube via yt-dlp |
-| `tts-enhance.sh` | ffmpeg EQ + compression + WAV→MP3 conversion |
-| `wav2mp3.sh` | Bare WAV→MP3 at 192k (no processing) |
-| `wav-join.sh` | Concatenates multiple WAV files via ffmpeg concat demuxer |
-| `capture_mol.py` | Royal Road chapter scraper — Mother of Learning |
-| `capture_zos.py` | Royal Road chapter scraper — Zenith of Sorcery |
+| `scripts/voice-sample` | Bash script: extracts voice clips from YouTube via yt-dlp |
+| `scripts/tts-enhance.sh` | ffmpeg EQ + compression + WAV→MP3 conversion |
+| `scripts/wav2mp3.sh` | Bare WAV→MP3 at 192k (no processing) |
+| `scripts/wav-join.sh` | Concatenates multiple WAV files via ffmpeg concat demuxer |
+| `src/tts_books/scrapers/mother_of_learning.py` | Royal Road chapter scraper — Mother of Learning |
+| `src/tts_books/scrapers/zenith_of_sorcery.py` | Royal Road chapter scraper — Zenith of Sorcery |
 
 Voice reference WAVs live in `~/voice-samples/` (canonical) and in `~/bin/*.wav` (legacy copies).  
 Books (plain text) live in `~/books/`.  
 Generated audio lands in `~/tts_output/`.
 
-## tts_book_gui.py architecture
+## gui.py architecture
 
 ### Thread model
 All TTS generation runs in a daemon thread (`_generate_thread` → `_do_generate`). The main thread is tkinter's event loop. Cross-thread UI updates **must** use `root.after(0, lambda: ...)` — never call tkinter widgets directly from the generation thread.
@@ -161,7 +161,7 @@ These files under `~/chatterbox-venv/lib/python3.12/site-packages/chatterbox/` h
 
 ### `tts_turbo.py` — `generate()`
 
-- `prepare_conditionals()` is called **once per job** (before the chunk loop in `tts_book_gui.py`). Each subsequent chunk call passes `audio_prompt_path=None` so the cached `self.conds` is reused without re-loading the reference WAV on every chunk.
+- `prepare_conditionals()` is called **once per job** (before the chunk loop in `src/tts_books/gui.py`). Each subsequent chunk call passes `audio_prompt_path=None` so the cached `self.conds` is reused without re-loading the reference WAV on every chunk.
 - `generate()` now accepts two new keyword arguments: `max_gen_len=None` (defaults internally to `max(2000, len(text)*25)`) and `no_repeat_ngram_size=6`. Both are forwarded to `inference_turbo()`. (Lowered from 8 to 6 on 2026-07-23 after observing 6-token phrase loops slipping past the 8-gram guard.)
 
 ### `models/t3/t3.py` — `inference_turbo()`
@@ -171,7 +171,7 @@ These files under `~/chatterbox-venv/lib/python3.12/site-packages/chatterbox/` h
 
 ## Royal Road chapter capture pattern
 
-`capture_mol.py` and `capture_zos.py` share the same structure: `fetch()` → `extract()` → follow `next_url`. For ad-hoc capture of a new fiction, copy either file, change `start_url` and `output_file`, and run directly. For sites that return 403 to simple requests, use `curl` with Firefox User-Agent headers piped to a BeautifulSoup parser (see the Unconquered Tower session for the exact headers).
+`src/tts_books/scrapers/mother_of_learning.py` and `zenith_of_sorcery.py` share the same structure: `fetch()` → `extract()` → follow `next_url`. For ad-hoc capture of a new fiction, copy either file, change `start_url` and `output_file`, and run directly (or invoke via the installed entry points `capture-mol` / `capture-zos`). For sites that return 403 to simple requests, use `curl` with Firefox User-Agent headers piped to a BeautifulSoup parser (see the Unconquered Tower session for the exact headers).
 
 Chapter separators in scraped text (`='*60`) are automatically skipped by `_SEPARATOR_RE` in `split_text()`.
 

@@ -1,12 +1,18 @@
 # Refactor Plan: convert tts-books to an installable package
 
-**Status:** Not started. Sketch only — no code has been changed against this plan.
+**Status:**
+- ✅ Phase 1 — src/ layout + entry points (done)
+- ✅ Phase 3.0 — prep refactors (dataclasses, Logger, CancelToken) done in-place
+- ✅ Phase 5 — thin launcher scripts wrapping installed entry points (done)
+- ⏳ Phase 2 — XDG config paths (not started)
+- ⏳ Phase 3.1-3.3 — break up gui.py per the 13-step extraction order
+- ⏳ Phase 4 — test scaffolding (partial: 22 tests for the three prep classes; broader coverage pending)
+- ⏳ Phase 6 — Chatterbox patches as patch files
+- ⏳ Phase 7 — CI + release
 
-**Motivation:** The current layout is flat scripts with hardcoded `~/bin/` paths, a 2000+ line monolithic `tts_book_gui.py`, and no tests. This works for personal use but blocks: (a) `pip install -e .` in the venv, (b) PyCharm's package-aware refactor tools, (c) unit tests, (d) publishing to GitHub as something contributors can navigate.
+**Motivation:** The current layout was flat scripts with hardcoded `~/bin/` paths, a 2000+ line monolithic `tts_book_gui.py`, and no tests. Phases 1 and 5 resolved the flat-scripts and `~/bin/` coupling; the monolith is now `src/tts_books/gui.py` awaiting the 3.1 extraction.
 
 **Non-goal:** Feature changes. This refactor is structural; behavior stays identical.
-
-**Key constraint:** `~/bin/` remains the canonical runtime during and after the refactor. Either the project checkout becomes the runtime (via `pip install -e .` into `~/chatterbox-venv/`, and `~/bin/*.sh` become thin wrappers that just `exec` the entry points), or `~/bin/` is symlinked into the project. Decide this before starting Phase 1.
 
 ---
 
@@ -89,7 +95,7 @@ ARCHIVE_DIR = data_dir() / "archive"
 
 ---
 
-## Phase 3 — Break up `tts_book_gui.py`
+## Phase 3 — Break up `gui.py`
 
 The single file is ~170 KB / 2000+ lines and mixes: tkinter UI, chunking, TTS invocation, garbled detection, archiving, memory management, VoxCeleb1 browsing.
 

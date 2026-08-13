@@ -20,15 +20,16 @@ Runs entirely on CPU — no GPU required. Designed for machines with ample RAM (
 ## Repository layout
 
 ```
-tts_book_gui.py                    Main tkinter GUI (~170 KB, single file)
-gradio_tts_turbo_app.py            Alternative Gradio web UI (simpler, no resume)
-capture_mol.py                     Royal Road scraper — Mother of Learning
-capture_zos.py                     Royal Road scraper — Zenith of Sorcery
-tts-pronunciation.example.json     Sample pronunciation dictionary
+src/tts_books/
+  gui.py                           Main tkinter GUI (~170 KB, single file)
+  gradio_app.py                    Alternative Gradio web UI (simpler, no resume)
+  scrapers/
+    mother_of_learning.py          Royal Road scraper — Mother of Learning
+    zenith_of_sorcery.py           Royal Road scraper — Zenith of Sorcery
 
 scripts/
-  tts-book.sh                      Launcher for the tkinter GUI (sets memory flags)
-  start-tts.sh                     Launcher for the Gradio web UI
+  tts-book.sh                      Launcher wrapping the tts-book entry point (sets memory flags)
+  start-tts.sh                     Launcher wrapping the tts-book-web entry point
   tts-watchdog.sh                  Watchdog for long-running TTS jobs
   tts-enhance.sh                   ffmpeg EQ + compression + WAV→MP3 conversion
   wav2mp3.sh                       Bare WAV→MP3 at 192k
@@ -37,22 +38,28 @@ scripts/
 
 docs/
   CLAUDE.md                        Detailed architecture / internals notes
-  REFACTOR-PLAN.md                 Roadmap: convert to installable package
+  REFACTOR-PLAN.md                 Remaining refactor phases (2, 3.1-3.3, 4, 6, 7)
 
-tests/                             (placeholder — no tests yet)
+tests/
+  test_prep_refactors.py           22 unit tests covering the CancelToken,
+                                   Settings, and BatchItem prep-refactor classes
 
-pyproject.toml                     Project metadata + tool config (black, ruff, pytest)
+pyproject.toml                     Project metadata, entry points (tts-book,
+                                   tts-book-web, capture-mol, capture-zos),
+                                   tool config (black, ruff, pytest)
+tts-pronunciation.example.json     Sample pronunciation dictionary
 requirements.txt                   Runtime dependencies
 ```
 
 ## Setup
 
-1. Create the Python virtual environment (expected at `~/chatterbox-venv/`):
+1. Create the Python virtual environment (expected at `~/chatterbox-venv/`) and install runtime deps + the package itself:
 
    ```bash
    python3.12 -m venv ~/chatterbox-venv
    source ~/chatterbox-venv/bin/activate
    pip install -r requirements.txt
+   pip install -e .            # exposes tts-book, tts-book-web, capture-mol, capture-zos on PATH
    ```
 
 2. (Recommended) Install jemalloc for better memory behavior across long runs:
