@@ -2,11 +2,11 @@
 
 **Status:**
 - ✅ Phase 1 — src/ layout + entry points (done)
+- ✅ Phase 2 — XDG config paths (done — paths.py; auto-migrates ~/bin/*.json)
 - ✅ Phase 3.0 — prep refactors (dataclasses, Logger, CancelToken) done in-place
 - ✅ Phase 5 — thin launcher scripts wrapping installed entry points (done)
-- ⏳ Phase 2 — XDG config paths (not started)
 - ⏳ Phase 3.1-3.3 — break up gui.py per the 13-step extraction order
-- ⏳ Phase 4 — test scaffolding (partial: 22 tests for the three prep classes; broader coverage pending)
+- ⏳ Phase 4 — test scaffolding (partial: 36 tests -- 22 prep-class + 14 paths; broader coverage pending)
 - ⏳ Phase 6 — Chatterbox patches as patch files
 - ⏳ Phase 7 — CI + release
 

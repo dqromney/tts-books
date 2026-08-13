@@ -23,8 +23,9 @@ Both scripts activate the venv and exec the installed console entry points (`tts
 |------|------|
 | `src/tts_books/gui.py` | Main tkinter GUI — single Python file, ~2000+ lines |
 | `src/tts_books/gradio_app.py` | Gradio web alternative — simpler, no resume support |
-| `tts-book.config` | JSON config (paths + instance count) — location currently alongside `gui.py` (Phase 2 moves it to `$XDG_CONFIG_HOME/tts-books/`) |
-| `tts-pronunciation.json` | Pronunciation substitution dictionary (word→replacement); created on first Add |
+| `~/.config/tts-books/app.json` | JSON config (paths + instance count). Location resolved by `src/tts_books/paths.py`; honours `$XDG_CONFIG_HOME` |
+| `~/.config/tts-books/queue.json` | Persisted batch queue |
+| `~/.config/tts-books/pronunciation.json` | Pronunciation substitution dictionary (word→replacement); created on first Add |
 | `scripts/voice-sample` | Bash script: extracts voice clips from YouTube via yt-dlp |
 | `scripts/tts-enhance.sh` | ffmpeg EQ + compression + WAV→MP3 conversion |
 | `scripts/wav2mp3.sh` | Bare WAV→MP3 at 192k (no processing) |
@@ -51,10 +52,10 @@ Resume works by two-step lookup:
 **Critical**: when resuming, always use `state["chunks"]` from disk — never re-split the text. Re-splitting produces different chunk boundaries and misaligns the completed-set indices.
 
 ### Config system
-`tts-book.config` (JSON, lives next to the script in `~/bin/`) stores directory paths and an `instance_count`. The count is incremented at launch and decremented at clean exit via `WM_DELETE_WINDOW`. The Settings dialog reads the live count from disk (not memory) to detect concurrent instances and block changes when >1 is open.
+`app.json` (path resolved by `src/tts_books/paths.py`; defaults to `~/.config/tts-books/app.json` or `$XDG_CONFIG_HOME/tts-books/app.json`) stores directory paths and an `instance_count`. The count is incremented at launch and decremented at clean exit via `WM_DELETE_WINDOW`. The Settings dialog reads the live count from disk (not memory) to detect concurrent instances and block changes when >1 is open. Pre-Phase-2 files at `~/bin/tts-book.config` are auto-copied to the XDG location on first launch by `paths.migrate_legacy()`; the `~/bin/` copies stay in place as a transition-period safety net.
 
 ### Batch queue persistence
-`tts-book.queue.json` (alongside the config) saves the batch queue to disk on every add/remove/clear/status-change. On startup, `_load_batch_queue()` restores the queue. Items stuck in "processing" state (from a crash) are reset to "pending". The `_batch_next_id` counter is persisted so IDs don't collide across restarts.
+`queue.json` (alongside `app.json` under `$XDG_CONFIG_HOME/tts-books/`) saves the batch queue to disk on every add/remove/clear/status-change. On startup, `_load_batch_queue()` restores the queue. Items stuck in "processing" state (from a crash) are reset to "pending". The `_batch_next_id` counter is persisted so IDs don't collide across restarts.
 
 Add/Remove/Clear buttons (`batch_add_btn`, `batch_remove_btn`, `batch_clear_btn`) are stored as instance vars and remain **enabled during batch runs** to allow live queue management. `_remove_from_batch()` skips items with `status == "processing"`. `_clear_batch()` only removes non-processing items.
 
@@ -74,7 +75,7 @@ Voice selection uses the voice combobox and Browse VoxCeleb1 only. The former "C
 `split_text()` in the module: splits on sentence endings and (optionally) clause endings, groups sentences greedily up to `max_chars`, hard-splits oversized sentences at comma/semicolon/word boundaries. `_SEPARATOR_RE` strips decorative separator lines (`====`, `----`, `****`, etc.) from paragraphs before chunking.
 
 ### Pronunciation dictionary
-`PRON_DICT_PATH = ~/bin/tts-pronunciation.json` stores word-to-replacement mappings as a flat JSON object. Module-level functions:
+`PRON_DICT_PATH` (imported from `src/tts_books/paths.py`; resolves to `~/.config/tts-books/pronunciation.json` by default) stores word-to-replacement mappings as a flat JSON object. Module-level functions:
 
 - `_load_pron_dict()` — reads the file (returns `{}` if missing)
 - `_save_pron_dict(d)` — writes the file atomically
