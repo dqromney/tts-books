@@ -54,6 +54,15 @@ from tts_books.io.text_extract import load_text_file
 from tts_books.memory.pruning import do_prune
 from tts_books.pronunciation import apply_pronunciation, load_pron_dict, save_pron_dict
 from tts_books.quality.whisper_backend import whisper as _whisper
+from tts_books.voices.registry import scan_voice_dir
+from tts_books.voices.voxceleb import (
+    download_voxceleb_speaker,
+    get_hf_token,
+    load_voxceleb_metadata,
+)
+from tts_books.voices.voxceleb import (
+    sanitize_name as _sanitize_name,
+)
 
 DEVICE = "cpu"
 
@@ -61,11 +70,6 @@ EVENT_TAGS = [
     "[clear throat]", "[sigh]", "[shush]", "[cough]", "[groan]",
     "[sniff]", "[gasp]", "[chuckle]", "[laugh]",
 ]
-
-
-def _sanitize_name(name):
-    return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
-
 
 
 @dataclass
@@ -1793,12 +1797,7 @@ class TTSBookApp:
         tree.bind("<Double-1>", lambda e: do_resume() if selected_jd[0] else None)
 
     def _populate_voice_combo(self):
-        self._voice_map = {}
-        if os.path.isdir(self._voice_samples_dir):
-            for f in sorted(os.listdir(self._voice_samples_dir)):
-                if f.lower().endswith(".wav"):
-                    stem = os.path.splitext(f)[0]
-                    self._voice_map[stem] = os.path.join(self._voice_samples_dir, f)
+        self._voice_map = scan_voice_dir(self._voice_samples_dir)
         self.voice_combo["values"] = list(self._voice_map.keys())
         current = self.voice_combo_var.get()
         if current not in self._voice_map:
@@ -1814,18 +1813,7 @@ class TTSBookApp:
 
     @staticmethod
     def _get_hf_token():
-        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-        if token:
-            return token
-        cached = os.path.expanduser("~/.cache/huggingface/token")
-        if os.path.isfile(cached):
-            try:
-                t = open(cached).read().strip()
-                if t:
-                    return t
-            except Exception:
-                pass
-        return None
+        return get_hf_token()
 
     def _snapshot_settings(self) -> dict:
         """Return dict of current UI settings for batch queue snapshot."""
@@ -2070,12 +2058,10 @@ class TTSBookApp:
 
     def _browse_dataset(self):
         try:
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import hf_hub_download  # noqa: F401 — presence check
         except ImportError:
             messagebox.showerror("Missing dependency", "huggingface_hub is not installed.")
             return
-        import csv
-        import shutil
 
         hf_token = self._get_hf_token()
 
@@ -2128,7 +2114,7 @@ class TTSBookApp:
         dl_btn.pack(side="left")
         ttk.Button(bottom, text="Close", command=dlg.destroy).pack(side="right")
 
-        all_rows = []
+        all_rows: list[tuple[str, str, str]] = []
 
         def local_status(name):
             fname = _sanitize_name(name) + ".wav"
@@ -2170,16 +2156,7 @@ class TTSBookApp:
 
             def worker():
                 try:
-                    cached = hf_hub_download(
-                        repo_id="sdialog/voices-voxceleb1",
-                        filename=f"audio/{sid}.wav",
-                        repo_type="dataset",
-                        token=hf_token,
-                    )
-                    dest_name = _sanitize_name(name) + ".wav"
-                    os.makedirs(self._voice_samples_dir, exist_ok=True)
-                    dest = os.path.join(self._voice_samples_dir, dest_name)
-                    shutil.copy2(cached, dest)
+                    dest = download_voxceleb_speaker(sid, name, self._voice_samples_dir, hf_token)
                     dlg.after(0, lambda: on_downloaded(name, dest))
                 except Exception as e:
                     dlg.after(0, lambda err=e: dlg_status.config(
@@ -2190,29 +2167,11 @@ class TTSBookApp:
 
         def load_metadata():
             try:
-                csv_path = hf_hub_download(
-                    repo_id="sdialog/voices-voxceleb1",
-                    filename="metadata.csv",
-                    repo_type="dataset",
-                    token=hf_token,
-                )
-                with open(csv_path, newline="", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    fieldnames = reader.fieldnames or []
-                    name_col = next((c for c in fieldnames if "name" in c.lower()), None) or (fieldnames[0] if fieldnames else "")
-                    gender_col = next((c for c in fieldnames if "gender" in c.lower()), None) or ""
-                    id_col = next((c for c in fieldnames if c.lower() in ("id", "voxceleb1 id", "voxceleb_id", "speaker_id")), None)
-                    if id_col is None:
-                        id_col = next((c for c in fieldnames if "id" in c.lower() and c != name_col), None) or ""
-                    for row in reader:
-                        name = row.get(name_col, "").strip()
-                        gender = row.get(gender_col, "").strip() if gender_col else ""
-                        sid = row.get(id_col, "").strip() if id_col else ""
-                        if name and sid:
-                            all_rows.append((name, gender, sid))
+                rows = load_voxceleb_metadata(hf_token)
+                all_rows.extend(rows)
                 dlg.after(0, lambda: dlg_status.config(
                     text=f"{len(all_rows)} speakers available", foreground="gray"))
-                dlg.after(0, lambda: refresh_tree())
+                dlg.after(0, refresh_tree)
             except Exception as e:
                 dlg.after(0, lambda err=e: dlg_status.config(
                     text=f"Failed to load metadata: {err}", foreground="red"))
