@@ -31,6 +31,7 @@ import torch as th
 import torchaudio
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
+from tts_books.generation.chunking import split_text
 from tts_books.io.text_extract import load_text_file
 from tts_books.paths import APP_CONFIG_PATH as CONFIG_PATH, QUEUE_PATH as BATCH_QUEUE_PATH
 from tts_books.pronunciation import apply_pronunciation, load_pron_dict, save_pron_dict
@@ -104,79 +105,6 @@ EVENT_TAGS = [
 
 def _sanitize_name(name):
     return re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
-
-
-_SEPARATOR_RE = re.compile(r'^([=\-*~_#])\1{3,}$')
-
-
-def split_text(text, max_chars=200, split_clauses=True):
-    """Split text into TTS-friendly chunks at natural boundaries."""
-    sent_end = r'(?<=[.!?])[\"”\u2019]?\s+'
-    clause_end = r'|(?<=[;:])\s+'
-    boundary = re.compile(sent_end + (clause_end if split_clauses else ''))
-
-    sentences = []
-    for para in re.split(r'\n\s*\n', text.strip()):
-        para = para.strip()
-        if not para:
-            continue
-        lines = [l for l in para.splitlines() if not _SEPARATOR_RE.match(l.strip())]
-        para = '\n'.join(lines).strip()
-        if not para:
-            continue
-        para = re.sub(r'(?<!\n)\n(?!\n)', ' ', para)
-        para = re.sub(r' {2,}', ' ', para)
-        for s in boundary.split(para):
-            s = s.strip()
-            if s:
-                sentences.append(s)
-
-    def _opener(s):
-        """Return the first-2-word tuple of a sentence (used for anaphora guard)."""
-        ws = s.split()
-        return tuple(ws[:2]) if len(ws) >= 2 else (tuple(ws) if ws else ())
-
-    chunks = []
-    current = ""
-    current_openers = []   # first-2-word tuples of sentences already in current chunk
-
-    for s in sentences:
-        opener = _opener(s)
-        if not current:
-            current = s
-            current_openers = [opener]
-        elif len(current) + 1 + len(s) <= max_chars:
-            # Anaphora guard: avoid 3+ consecutive sentences with the same
-            # first-2-word opener in one chunk — the TTS tends to loop on them.
-            if opener and current_openers.count(opener) >= 2:
-                chunks.append(current)
-                current = s
-                current_openers = [opener]
-            else:
-                current = current + " " + s
-                current_openers.append(opener)
-        else:
-            chunks.append(current)
-            current = s
-            current_openers = [opener]
-        while len(current) > max_chars:
-            semi_pos  = current.rfind(';', 0, max_chars)
-            comma_pos = current.rfind(',', 0, max_chars)
-            space_pos = current.rfind(' ', 0, max_chars)
-            split_at  = max(semi_pos, comma_pos, space_pos)
-            if split_at <= 0:
-                split_at = max_chars
-            chunks.append(current[:split_at].strip())
-            rest = current[split_at:].strip()
-            # Capitalize continuations split at a semicolon (Appendix list items
-            # starting mid-sentence confuse the TTS without a sentence-start signal).
-            if split_at == semi_pos and rest and rest[0].islower():
-                rest = rest[0].upper() + rest[1:]
-            current = rest
-            current_openers = [_opener(current)]
-    if current:
-        chunks.append(current)
-    return chunks if chunks else [text]
 
 
 def _crossfade_chunks(wavs, sr, crossfade_ms=50):
