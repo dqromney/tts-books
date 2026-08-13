@@ -31,72 +31,21 @@ import torch as th
 import torchaudio
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
+from tts_books.config import (
+    MAX_CHUNK_RETRIES,
+    OUTPUT_DIR,
+    VOICE_SAMPLES_DIR,
+    _PRUNE_THRESHOLD_GB,
+    load_config,
+    save_config,
+)
 from tts_books.generation.chunking import split_text
 from tts_books.generation.stitching import crossfade_chunks, remove_dc_offset
 from tts_books.io.text_extract import load_text_file
-from tts_books.paths import APP_CONFIG_PATH as CONFIG_PATH, QUEUE_PATH as BATCH_QUEUE_PATH
+from tts_books.paths import QUEUE_PATH as BATCH_QUEUE_PATH
 from tts_books.pronunciation import apply_pronunciation, load_pron_dict, save_pron_dict
 
 DEVICE = "cpu"
-MAX_CHARS_PER_CHUNK = 200   # default; override via UI
-
-# Default paths — overridden by config file if present. Unlike the state
-# files above (which now live under $XDG_CONFIG_HOME/tts-books/ per
-# paths.py), these are user-configurable via the Settings dialog and
-# default to well-known $HOME locations for backward compatibility.
-VOICE_SAMPLES_DIR = os.path.expanduser("~/voice-samples")
-JOBS_DIR = os.path.expanduser("~/tts_output/jobs")
-OUTPUT_DIR = os.path.expanduser("~/tts_output")
-MAX_CHUNK_RETRIES = 3
-_PRUNE_THRESHOLD_GB = 12.0  # auto-prune warning threshold (system free RAM)
-
-_whisper_model = None   # lazy-loaded faster-whisper tiny.en, shared across chunks
-_whisper_unavailable = False  # set True after a failed import so we don't retry
-
-def _load_whisper():
-    """Return a faster-whisper WhisperModel, or None if unavailable."""
-    global _whisper_model, _whisper_unavailable
-    if _whisper_model is not None:
-        return _whisper_model
-    if _whisper_unavailable:
-        return None
-    try:
-        from faster_whisper import WhisperModel
-        _whisper_model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
-        return _whisper_model
-    except Exception:
-        _whisper_unavailable = True
-        return None
-
-
-def _load_config():
-    cfg = {
-        "voice_samples_dir": VOICE_SAMPLES_DIR,
-        "jobs_dir": JOBS_DIR,
-        "output_dir": OUTPUT_DIR,
-        "instance_count": 0,
-    }
-    if os.path.isfile(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH) as f:
-                data = json.load(f)
-            dir_keys = {"voice_samples_dir", "jobs_dir", "output_dir"}
-            for k, v in data.items():
-                if k in dir_keys and v:
-                    cfg[k] = os.path.expanduser(v)
-                elif k not in dir_keys:
-                    cfg[k] = v
-        except Exception:
-            pass
-    return cfg
-
-
-def _save_config(cfg):
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2)
-    os.replace(tmp, CONFIG_PATH)
-
 
 EVENT_TAGS = [
     "[clear throat]", "[sigh]", "[shush]", "[cough]", "[groan]",
@@ -340,7 +289,7 @@ class TTSBookApp:
         self._gen_running = False
         self._model_mem_mb = 0.0  # RSS delta measured when model first loads
 
-        cfg = _load_config()
+        cfg = load_config()
         self._voice_samples_dir = cfg["voice_samples_dir"]
         self._jobs_dir = cfg["jobs_dir"]
         self._output_dir = cfg["output_dir"]
@@ -348,7 +297,7 @@ class TTSBookApp:
         self._log_buffer = []   # plain-text log lines for saving to archive
 
         cfg["instance_count"] = cfg.get("instance_count", 0) + 1
-        _save_config(cfg)
+        save_config(cfg)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Batch queue
@@ -2097,7 +2046,7 @@ class TTSBookApp:
 
     def _open_settings(self):
         try:
-            live = _load_config().get("instance_count", 1)
+            live = load_config().get("instance_count", 1)
         except Exception:
             live = 1
         if live > 1:
@@ -2145,7 +2094,7 @@ class TTSBookApp:
                     messagebox.showwarning("Settings", f"{attr} cannot be empty.", parent=dlg)
                     return
                 setattr(self, attr, os.path.expanduser(val))
-            _save_config({
+            save_config({
                 "voice_samples_dir": self._voice_samples_dir,
                 "jobs_dir": self._jobs_dir,
                 "output_dir": self._output_dir,
@@ -2323,9 +2272,9 @@ class TTSBookApp:
                 return
             self.cancel_token.cancel()
         try:
-            cfg = _load_config()
+            cfg = load_config()
             cfg["instance_count"] = max(0, cfg.get("instance_count", 1) - 1)
-            _save_config(cfg)
+            save_config(cfg)
         except Exception:
             pass
         self.root.destroy()
