@@ -9,9 +9,6 @@ Features:
 - Redesigned Advanced Options panel
 """
 
-import ctypes
-import gc
-import hashlib
 import json
 import os
 import re
@@ -19,7 +16,6 @@ import shutil
 import statistics
 import subprocess
 import threading
-import time
 import tkinter as tk
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
@@ -27,30 +23,37 @@ from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 from typing import Protocol
 
-import torch as th
-import torchaudio
-from chatterbox.tts_turbo import ChatterboxTurboTTS
-
+from tts_books.batch import load_batch_queue as _load_batch_queue_data
+from tts_books.batch import save_batch_queue as _save_batch_queue_data
 from tts_books.config import (
-    MAX_CHUNK_RETRIES,
-    OUTPUT_DIR,
-    VOICE_SAMPLES_DIR,
-    _PRUNE_THRESHOLD_GB,
     load_config,
     save_config,
 )
-from tts_books.batch import load_batch_queue as _load_batch_queue_data
-from tts_books.batch import save_batch_queue as _save_batch_queue_data
 from tts_books.generation.archiving import archive_job, restore_for_rework, scan_rework_jobs
-from tts_books.memory.pruning import do_prune, mem_rss_mb
-from tts_books.quality.garbled import is_chunk_garbled
-from tts_books.quality.whisper_backend import whisper as _whisper
 from tts_books.generation.chunking import split_text
+from tts_books.generation.pipeline import (
+    do_generate,
+)
+from tts_books.generation.pipeline import (
+    find_resumable_job as _pipeline_find_resumable_job,
+)
+from tts_books.generation.pipeline import (
+    job_dir as _pipeline_job_dir,
+)
+from tts_books.generation.pipeline import (
+    reconcile_job_state as _pipeline_reconcile_job_state,
+)
+from tts_books.generation.pipeline import (
+    save_state as _pipeline_save_state,
+)
+from tts_books.generation.pipeline import (
+    text_hash as _pipeline_text_hash,
+)
 from tts_books.io.audio_io import wav_to_mp3
-from tts_books.generation.stitching import crossfade_chunks, remove_dc_offset
 from tts_books.io.text_extract import load_text_file
-from tts_books.paths import QUEUE_PATH as BATCH_QUEUE_PATH
+from tts_books.memory.pruning import do_prune
 from tts_books.pronunciation import apply_pronunciation, load_pron_dict, save_pron_dict
+from tts_books.quality.whisper_backend import whisper as _whisper
 
 DEVICE = "cpu"
 
@@ -176,6 +179,7 @@ class Logger(Protocol):
     def warn(self, msg: str) -> None: ...
     def error(self, msg: str) -> None: ...
     def success(self, msg: str) -> None: ...
+    def chunk(self, msg: str) -> None: ...
 
     @property
     def buffer(self) -> list[str]: ...
@@ -284,6 +288,7 @@ class TTSBookApp:
         )
 
         self.model = None
+        self._model_box = [None]  # mutable ref for pipeline.do_generate; synced before/after each run
         self.cancel_token = CancelToken()
         self._source_path = None
         self._play_proc = None
@@ -294,7 +299,6 @@ class TTSBookApp:
         self._source_lockable = []
         self._adv_lockable = []
         self._gen_running = False
-        self._model_mem_mb = 0.0  # RSS delta measured when model first loads
 
         cfg = load_config()
         self._voice_samples_dir = cfg["voice_samples_dir"]
@@ -695,6 +699,9 @@ class TTSBookApp:
 
     def success(self, msg: str) -> None:
         self._log(msg, "success")
+
+    def chunk(self, msg: str) -> None:
+        self._log(msg, "chunk")
 
     @property
     def buffer(self) -> list[str]:
@@ -2362,115 +2369,24 @@ class TTSBookApp:
     # ── state / resume support ──────────────────────────────────────
 
     def _text_hash(self, text):
-        return hashlib.md5(text.encode()).hexdigest()[:12]
+        return _pipeline_text_hash(text)
 
     def _job_dir(self, text):
-        return os.path.join(self._jobs_dir, self._text_hash(text))
+        return _pipeline_job_dir(text, self._jobs_dir)
 
     def _state_path(self, text):
-        return os.path.join(self._job_dir(text), "state.json")
+        from tts_books.generation.pipeline import state_path as _sp
+        return _sp(text, self._jobs_dir)
 
     def _find_resumable_job(self, text, _hint_hash=None):
-        """Return (job_dir, state) for an incomplete job, or (None, None).
-
-        _hint_hash: directory basename recorded at generation time — tried first
-        so the lookup survives pronunciation-dict or source-file drift.
-        """
-        def _check_dir(jd):
-            sp = os.path.join(jd, "state.json")
-            if not os.path.exists(sp):
-                self._log(f"  [resume] {jd}: no state.json", "info")
-                return None
-            try:
-                with open(sp) as f:
-                    state = json.load(f)
-                completed = set(state.get("completed", []))
-                total = state.get("total_chunks", 0)
-                self._log(
-                    f"  [resume] {os.path.basename(jd)}: "
-                    f"completed={len(completed)}/{total}",
-                    "info")
-                # Include jobs where all chunks are done but concat/archive
-                # didn't finish (completed == total); <= catches that case.
-                if total > 0 and len(completed) <= total:
-                    return state
-            except Exception as _e:
-                self._log(f"  [resume] {jd}: read error {_e}", "warn")
-            return None
-
-        # 1. Hint hash recorded at generation time (most reliable)
-        if _hint_hash:
-            jd = os.path.join(self._jobs_dir, _hint_hash)
-            self._log(f"  [resume] hint-hash lookup: {jd}", "info")
-            state = _check_dir(jd)
-            if state is not None:
-                return jd, state
-
-        # 2. Hash of the text as provided (pronunciation already applied by caller)
-        jd = self._job_dir(text)
-        self._log(f"  [resume] text-hash lookup: {os.path.basename(jd)}", "info")
-        state = _check_dir(jd)
-        if state is not None:
-            return jd, state
-
-        return None, None
+        return _pipeline_find_resumable_job(text, self._jobs_dir, self, _hint_hash=_hint_hash)
 
     def _reconcile_job_state(self, job_dir, state):
-        """Compare state.json completed set against chunk WAVs actually on disk.
-
-        Returns (updated_state, disk_count, json_count, was_changed).
-        If counts differ, state.json is rewritten to match disk before returning.
-        """
-        disk_indices = set()
-        try:
-            for fname in os.listdir(job_dir):
-                m = re.match(r'chunk_(\d+)\.wav$', fname)
-                if m:
-                    disk_indices.add(int(m.group(1)))
-        except OSError:
-            return state, 0, len(state.get("completed", [])), False
-
-        json_indices = set(state.get("completed", []))
-        disk_count = len(disk_indices)
-        json_count = len(json_indices)
-
-        if disk_indices == json_indices:
-            return state, disk_count, json_count, False
-
-        # Reconcile: disk is truth
-        updated = dict(state)
-        updated["completed"] = sorted(disk_indices)
-        try:
-            sp = os.path.join(job_dir, "state.json")
-            tmp = sp + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(updated, f)
-            os.replace(tmp, sp)
-        except Exception:
-            pass
-        return updated, disk_count, json_count, True
+        return _pipeline_reconcile_job_state(job_dir, state)
 
     def _save_state(self, text, chunks, completed, settings, output_path, job_dir=None):
-        jd = job_dir or self._job_dir(text)
-        os.makedirs(jd, exist_ok=True)
-        chunks_path = os.path.join(jd, "chunks.json")
-        if not os.path.exists(chunks_path):
-            tmp = chunks_path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump({"chunks": chunks}, f)
-            os.replace(tmp, chunks_path)
-        state = {
-            "text_hash": self._text_hash(text),
-            "total_chunks": len(chunks),
-            "completed": sorted(completed),
-            "settings": settings,
-            "output_path": output_path,
-            "created": datetime.now().isoformat(),
-        }
-        tmp = os.path.join(jd, "state.json.tmp")
-        with open(tmp, "w") as f:
-            json.dump(state, f)
-        os.replace(tmp, os.path.join(jd, "state.json"))
+        _pipeline_save_state(text, chunks, completed, settings, output_path,
+                             self._jobs_dir, job_dir_path=job_dir)
 
     def _start_resume(self):
         self._start_generate(resume=True)
@@ -2545,8 +2461,8 @@ class TTSBookApp:
                 self.root.after(0, lambda: self._on_done(output_path))
             else:
                 self.root.after(0, lambda: self._on_cancel())
-        except Exception:
-            self.root.after(0, lambda: self._on_error(str(e)))
+        except Exception as e:
+            self.root.after(0, lambda e=e: self._on_error(str(e)))
 
     def _update_mem_bar(self):
         """Refresh the toolbar RAM progress bar with current system memory usage."""
@@ -2572,370 +2488,44 @@ class TTSBookApp:
 
     def _do_generate(self, text, settings, ref_path=None, source_path=None,
                      resume=False, job_dir=None, state=None, batch_item=None):
-        """Core generation pipeline. Can be called for single-file or batch items.
+        """Thin wrapper — delegates to pipeline.do_generate().
 
-        Args:
-            text: Full text to synthesize
-            settings: Dict of generation parameters
-            ref_path: Path to reference voice .wav (or None)
-            source_path: Original source file path (for output naming)
-            resume: Whether to resume an existing partial job
-            job_dir: Pre-computed job directory (for resume, avoids hash mismatch)
-            state: Pre-loaded state dict (for resume)
-            batch_item: Batch queue item dict (for status updates), or None
+        Syncs self.model via self._model_box before and after the call so the
+        lazily-loaded / periodically-reloaded model persists between jobs.
         """
-        # Lazy load model
-        if self.model is None:
-            self.root.after(0, lambda: self.status.config(text="Loading model…", foreground="black"))
-            t0 = time.time()
-            _rss_before = mem_rss_mb()[0]
-            self.model = ChatterboxTurboTTS.from_pretrained(DEVICE)
-            _rss_after, _sys_free = mem_rss_mb()
-            self._model_mem_mb = max(0.0, _rss_after - _rss_before)
-            self._log(
-                f"Model loaded in {time.time()-t0:.1f}s"
-                f" (+{self._model_mem_mb/1024:.1f} GB RSS, {_sys_free/1024:.1f} GB free)",
-                "success")
-
-        n_threads = str(settings.get("cpu_threads", 4))
-        th.set_num_threads(int(n_threads))
-        os.environ["OMP_NUM_THREADS"] = n_threads
-        os.environ["MKL_NUM_THREADS"] = n_threads
-
-        seed_val = settings.get("seed", 0)
-        if seed_val != 0:
-            th.manual_seed(seed_val)
-
-        # Apply pronunciation substitutions only on fresh (non-resume) generations.
-        # On resume the text is reconstructed from the saved chunks, so pronunciation
-        # was already applied when the job was first created.
-        if not resume:
-            pron_dict = load_pron_dict()
-            if pron_dict:
-                text = apply_pronunciation(text, pron_dict)
-
-        # Job directory — must be resolved before loading chunks so the path is
-        # available throughout the rest of this function.
-        jd = job_dir if (resume and job_dir) else self._job_dir(text)
-        os.makedirs(jd, exist_ok=True)
-        # Record the exact job hash in the batch item so resume can find it
-        # reliably even if the pronunciation dict or source file changes later.
-        if batch_item is not None:
-            batch_item["_job_hash"] = os.path.basename(jd)
-
-        # Chunks
-        if resume and state:
-            # Prefer the separate chunks.json (current format); fall back to inline
-            # chunks in state (old format), then re-split as last resort.
-            chunks_file = os.path.join(jd, "chunks.json")
-            if os.path.exists(chunks_file):
-                with open(chunks_file) as f:
-                    chunks = json.load(f)["chunks"]
-            elif state.get("chunks"):
-                chunks = state["chunks"]
-            else:
-                chunks = split_text(text, max_chars=settings.get("chunk_size", 200),
-                                    split_clauses=settings.get("split_clauses", True))
-        else:
-            chunks = split_text(text, max_chars=settings.get("chunk_size", 200),
-                                split_clauses=settings.get("split_clauses", True))
-        total = len(chunks)
-
-        self._log(f"Text split into {total} chunks (max {settings.get('chunk_size', 200)} chars each)", "info")
-        if batch_item is not None:
-            if batch_item.get("chunks_total", 0) == 0:
-                batch_item["chunks_total"] = total
-            self.root.after(0, self._refresh_batch_tree)
-
-        # Output path
-        if state and state.get("output_path"):
-            output_path = state["output_path"]
-        else:
-            outdir = self._output_dir
-            os.makedirs(outdir, exist_ok=True)
-            if source_path:
-                stem = os.path.splitext(os.path.basename(source_path))[0]
-                output_path = os.path.join(outdir, f"{stem}.wav")
-            elif batch_item and batch_item.get("source_path"):
-                stem = os.path.splitext(os.path.basename(batch_item["source_path"]))[0]
-                output_path = os.path.join(outdir, f"{stem}.wav")
-            else:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_path = os.path.join(outdir, f"tts_{ts}.wav")
-
-        if resume and state:
-            completed = set(state.get("completed", []))
-            # Reconcile against WAV files actually on disk — an OOM kill can leave
-            # state.json behind while more chunks were already written to disk.
-            for fname in os.listdir(jd):
-                m = re.match(r'chunk_(\d+)\.wav', fname)
-                if m:
-                    completed.add(int(m.group(1)))
-            self.root.after(0, lambda: self.out_label.config(
-                text=f"Resuming: {len(completed)}/{total} chunks → {output_path}",
-                foreground="blue"))
-            self._log(f"Resuming: {len(completed)}/{total} chunks already done", "info")
-        else:
-            completed = set()
-            self._save_state(text, chunks, completed, settings, output_path, job_dir=jd)
-
-        chunk_times = []
-        t_start = time.time()
-        garbled_chunks = []   # chunks that remained garbled after all retries
-
-        # Cache voice conditionals once for all chunks
-        if ref_path:
-            self.model.prepare_conditionals(ref_path, norm_loudness=settings.get("norm_loudness", True))
-
-        try:
-            for i, chunk in enumerate(chunks):
-                # Check cancel FIRST, before pause wait
-                if self.cancel_token.cancelled:
-                    self.root.after(0, lambda: self.out_label.config(
-                        text=f"Partial: {len(completed)}/{total} chunks saved in {jd}", foreground="orange"))
-                    self._log(f"Cancelled at chunk {i+1}/{total}", "warn")
-                    return None
-
-                # Wait if paused
-                self.cancel_token.wait_if_paused()
-
-                # Re-check cancel after un-pausing
-                if self.cancel_token.cancelled:
-                    self.root.after(0, lambda: self.out_label.config(
-                        text=f"Partial: {len(completed)}/{total} chunks saved in {jd}", foreground="orange"))
-                    self._log(f"Cancelled at chunk {i+1}/{total}", "warn")
-                    return None
-
-                if i in completed:
-                    continue
-
-                pct = (len(completed) / total) * 100
-                desc = f"Chunk {i+1}/{total}"
-                self.root.after(0, lambda p=pct, d=desc: self._update_progress(p, d))
-
-                t_chunk = time.time()
-                wav = self.model.generate(
-                    chunk,
-                    audio_prompt_path=None,
-                    temperature=settings["temperature"],
-                    min_p=settings.get("min_p", 0.0),
-                    top_p=settings["top_p"],
-                    top_k=settings["top_k"],
-                    repetition_penalty=settings["repetition_penalty"],
-                    norm_loudness=settings.get("norm_loudness", True),
-                )
-                elapsed = time.time() - t_chunk
-                chunk_times.append(elapsed)
-
-                wav = wav.squeeze(0).cpu()
-                fpath = os.path.join(jd, f"chunk_{i:06d}.wav")
-                torchaudio.save(fpath, wav.unsqueeze(0), self.model.sr)
-                del wav
-
-                # Prune (gc.collect + malloc_trim) — cadence set by the
-                # "Prune every N chunks" spinbox in Advanced Options.
-                # 1 = after every chunk (original behavior); 0 = disabled.
-                # Read live so mid-run changes take effect immediately.
-                prune_every = self.prune_every.get()
-                if prune_every > 0 and (i + 1) % prune_every == 0:
-                    gc.collect()
-                    ctypes.CDLL("libc.so.6").malloc_trim(0)
-
-                # Periodically unload whisper to release ctranslate2 memory arena
-                if i > 0 and i % 25 == 0 and _whisper.is_loaded:
-                    _whisper.unload()
-                    gc.collect()
-                    ctypes.CDLL("libc.so.6").malloc_trim(0)
-                    self._log(f"  Whisper reloaded at chunk {i+1} to free ctranslate2 memory", "info")
-
-                # Warn (and prune) when system RAM drops below threshold
-                try:
-                    import psutil
-                    _avail = psutil.virtual_memory().available
-                    if _avail < _PRUNE_THRESHOLD_GB * 1024 ** 3:
-                        _whisper.unload()
-                        gc.collect()
-                        ctypes.CDLL("libc.so.6").malloc_trim(0)
-                        _proc_mb, _free_mb = mem_rss_mb()
-                        self._log(
-                            f"  ⚠ Low RAM auto-prune: {_free_mb/1024:.1f} GB free"
-                            f", {_proc_mb/1024:.1f} GB RSS",
-                            "warn")
-                except Exception:
-                    pass
-
-                garble_reason = is_chunk_garbled(fpath, chunk, _whisper, self)
-                if garble_reason:
-                    # Save the initial attempt as the current best before retrying.
-                    # Each retry overwrites fpath; we restore best if all retries fail.
-                    import shutil as _shutil
-                    best_fpath = fpath + ".best"
-                    _shutil.copy2(fpath, best_fpath)
-                    best_reason = garble_reason
-
-                    for _retry in range(MAX_CHUNK_RETRIES):
-                        self._log(
-                            f"  ⚠ Chunk {i+1} garbled [{garble_reason}]"
-                            f" (retry {_retry+1}/{MAX_CHUNK_RETRIES})…",
-                            "warn"
-                        )
-                        th.manual_seed(int(time.time() * 1e6) % (2 ** 31))
-                        retry_wav = self.model.generate(
-                            chunk,
-                            audio_prompt_path=None,
-                            temperature=settings["temperature"],
-                            min_p=settings.get("min_p", 0.0),
-                            top_p=settings["top_p"],
-                            top_k=settings["top_k"],
-                            repetition_penalty=settings["repetition_penalty"],
-                            norm_loudness=settings.get("norm_loudness", True),
-                        )
-                        retry_wav = retry_wav.squeeze(0).cpu()
-                        torchaudio.save(fpath, retry_wav.unsqueeze(0), self.model.sr)
-                        del retry_wav
-                        gc.collect()
-                        ctypes.CDLL("libc.so.6").malloc_trim(0)
-                        garble_reason = is_chunk_garbled(fpath, chunk, _whisper, self)
-                        if not garble_reason:
-                            # Clean retry — discard the saved best and keep this one
-                            os.remove(best_fpath)
-                            break
-                        # This retry is also garbled; keep whichever attempt was first
-                        # (initial generation is the model's most confident output)
-                    else:
-                        # All retries garbled — restore the initial attempt as best
-                        _shutil.move(best_fpath, fpath)
-                        self._log(
-                            f"  ⚠ Chunk {i+1} still garbled [{best_reason}]"
-                            f" after {MAX_CHUNK_RETRIES} retries — keeping first attempt",
-                            "warn"
-                        )
-                        garbled_chunks.append({
-                            "index": i,
-                            "filename": f"chunk_{i:06d}.wav",
-                            "reason": best_reason,
-                            "text": chunk,
-                        })
-                    # Clean up .best file if somehow still present
-                    if os.path.exists(best_fpath):
-                        os.remove(best_fpath)
-
-                completed.add(i)
-                self._save_state(text, chunks, completed, settings, output_path, job_dir=jd)
-
-                if batch_item is not None:
-                    avg_t = statistics.mean(chunk_times) if chunk_times else 0
-                    remaining = total - len(completed)
-                    batch_item["chunks_done"] = len(completed)
-                    batch_item["chunks_total"] = total
-                    batch_item["_eta_str"] = (
-                        f"~{avg_t * remaining / 60:.0f}m" if avg_t > 0 and remaining > 0
-                        else ("done" if remaining == 0 else ""))
-                    self.root.after(0, self._refresh_batch_tree)
-
-                # Periodic model reload to defragment memory
-                reload_every = self.reload_every.get()  # read live, not from snapshot
-                if reload_every > 0 and (i + 1) % reload_every == 0 and i + 1 < total:
-                    t_reload = time.time()
-                    self._log(f"Reloading model at chunk {i+1} (every {reload_every})...", "info")
-                    # Free the old model and whisper FIRST so malloc_trim can return
-                    # their pages to the OS before we measure free RAM or load fresh.
-                    self.model = None
-                    _whisper.unload()
-                    for _ in range(3):
-                        gc.collect()
-                    ctypes.CDLL("libc.so.6").malloc_trim(0)
-                    time.sleep(0.5)   # let OS reclaim mmap'd pages
-                    _proc, free_mb = mem_rss_mb()
-                    if free_mb < 10 * 1024:   # < 10 GB free after full cleanup
-                        self._log(
-                            f"  ⚠ Only {free_mb/1024:.1f} GB free after cleanup — "
-                            f"model freed but memory critically low; reloading anyway",
-                            "warn")
-                    self.model = ChatterboxTurboTTS.from_pretrained(DEVICE)
-                    th.set_num_threads(int(settings.get("cpu_threads", 4)))
-                    if ref_path:
-                        self.model.prepare_conditionals(ref_path,
-                            norm_loudness=settings.get("norm_loudness", True))
-                    proc_mb, free_mb = mem_rss_mb()
-                    self._log(
-                        f"  Model reloaded in {time.time()-t_reload:.0f}s"
-                        f" | {proc_mb/1024:.1f} GB RSS, {free_mb/1024:.1f} GB free",
-                        "success"
-                    )
-
-                # Log every 10th chunk or first/last
-                if i % 10 == 0 or i == 0 or i == total - 1:
-                    avg_t = statistics.mean(chunk_times) if chunk_times else 0
-                    eta = avg_t * (total - len(completed))
-                    proc_mb, free_mb = mem_rss_mb()
-                    self._log(
-                        f"Chunk {i+1}/{total} ({elapsed:.1f}s, avg {avg_t:.1f}s, ETA {eta/60:.0f}m)"
-                        f" | {proc_mb/1024:.1f} GB RSS, {free_mb/1024:.1f} GB free",
-                        "chunk")
-
-            if self.cancel_token.cancelled:
-                self.root.after(0, lambda: self.out_label.config(
-                    text=f"Partial: {len(completed)}/{total} chunks saved in {jd}", foreground="orange"))
-                self._log(f"Cancelled after {len(completed)}/{total} chunks", "warn")
-                return None
-
-            total_elapsed = time.time() - t_start
-            self._log(f"All {total} chunks generated in {total_elapsed/60:.1f}m", "success")
-            if batch_item is not None:
-                h, m = divmod(int(total_elapsed / 60), 60)
-                batch_item["gen_time"] = f"{h}h {m}m" if h else f"{m}m"
-            self.root.after(0, lambda: self._update_progress(100, "Concatenating…"))
-            self._log("Concatenating chunks…", "info")
-
-            chunk_files = [os.path.join(jd, f"chunk_{i:06d}.wav") for i in range(total)]
-            sr = self.model.sr
-
-            crossfade_ms = settings.get("crossfade_ms", 50)
-            if crossfade_ms > 0 and total > 1:
-                # Load all chunks and crossfade-stitch them.
-                wavs = []
-                for fpath in chunk_files:
-                    w, _ = torchaudio.load(fpath)
-                    wavs.append(w)
-                final = crossfade_chunks(wavs, sr, crossfade_ms=crossfade_ms)
-                self._log(
-                    f"Crossfaded {total} chunks ({crossfade_ms} ms overlap) "
-                    f"→ {final.shape[1] / sr:.1f}s", "info")
-            elif total == 1:
-                final, _ = torchaudio.load(chunk_files[0])
-            else:
-                between_sil = th.zeros(1, int(sr * 0.3))
-                waveforms = []
-                for fpath in chunk_files:
-                    w, _ = torchaudio.load(fpath)
-                    waveforms.append(w)
-                    waveforms.append(between_sil)
-                final = th.cat(waveforms[:-1], dim=1)
-
-            lead_s = settings.get("lead_silence", 0.0)
-            trail_s = settings.get("trail_silence", 0.0)
-            if lead_s > 0:
-                final = th.cat([th.zeros(1, int(sr * lead_s)), final], dim=1)
-            if trail_s > 0:
-                final = th.cat([final, th.zeros(1, int(sr * trail_s))], dim=1)
-            if lead_s > 0 or trail_s > 0:
-                self._log(f"Silence padding: {lead_s}s lead, {trail_s}s trail", "info")
-
-            # Remove DC offset before saving (prevents low-frequency thumps)
-            final = remove_dc_offset(final, sr)
-            torchaudio.save(output_path, final, sr)
-            self._log(f"Saved: {output_path}", "success")
-
-            self._archive_job(jd, garbled_chunks, output_path)
-
-            return output_path
-
-        except Exception:
-            self._log(f"Error during generation — job state preserved in {jd}", "error")
-            raise
-
-    # ── Archive & rework ──────────────────────────────────────────
+        self._model_box[0] = self.model
+        result = do_generate(
+            text=text,
+            settings=settings,
+            ref_path=ref_path,
+            source_path=source_path,
+            resume=resume,
+            job_dir_arg=job_dir,
+            state=state,
+            batch_item=batch_item,
+            jobs_dir=self._jobs_dir,
+            output_dir=self._output_dir,
+            archive_dir=self._archive_dir,
+            model_box=self._model_box,
+            cancel_token=self.cancel_token,
+            prune_every_fn=self.prune_every.get,
+            reload_every_fn=self.reload_every.get,
+            logger=self,
+            on_status=lambda t, fg="black": self.root.after(
+                0, lambda t=t, fg=fg: self.status.config(text=t, foreground=fg)
+            ),
+            on_out_label=lambda t, fg="black": self.root.after(
+                0, lambda t=t, fg=fg: self.out_label.config(text=t, foreground=fg)
+            ),
+            on_progress=lambda p, d: self.root.after(
+                0, lambda p=p, d=d: self._update_progress(p, d)
+            ),
+            on_batch_update=lambda: self.root.after(0, self._refresh_batch_tree),
+            on_archive_done=lambda: self.root.after(0, self._refresh_rework_badge),
+            whisper_handle=_whisper,
+        )
+        self.model = self._model_box[0]
+        return result
 
     def _archive_job(self, jd, garbled_chunks, output_path):
         """Move completed job dir to archive/, save log, write rework.json if needed."""
