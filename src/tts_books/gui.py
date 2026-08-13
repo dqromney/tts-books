@@ -9,31 +9,36 @@ Features:
 - Redesigned Advanced Options panel
 """
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import threading
+import ctypes
+import gc
+import hashlib
+import json
 import os
 import re
-import json
-import hashlib
-import time
 import shutil
-from dataclasses import dataclass, asdict, field, fields as dataclass_fields
-from datetime import datetime
-from typing import Protocol
-
-import gc
-import ctypes
 import statistics
 import subprocess
+import threading
+import time
+import tkinter as tk
+from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dataclass_fields
+from datetime import datetime
+from tkinter import filedialog, messagebox, ttk
+from typing import Protocol
+
 import torch as th
 import torchaudio
-import fitz  # pymupdf
 from chatterbox.tts_turbo import ChatterboxTurboTTS
 
+from tts_books.io.text_extract import load_text_file
 from tts_books.paths import (
     APP_CONFIG_PATH as CONFIG_PATH,
+)
+from tts_books.paths import (
     PRON_DICT_PATH,
+)
+from tts_books.paths import (
     QUEUE_PATH as BATCH_QUEUE_PATH,
 )
 
@@ -154,118 +159,6 @@ def _sanitize_name(name):
 
 
 _SEPARATOR_RE = re.compile(r'^([=\-*~_#])\1{3,}$')
-
-
-# ── text loading ──────────────────────────────────────────────────
-
-def load_text_file(path):
-    if path.lower().endswith('.pdf'):
-        doc = fitz.open(path)
-        text = "\n\n".join(page.get_text() for page in doc)
-        doc.close()
-        return text
-    elif path.lower().endswith('.epub'):
-        import ebooklib
-        from ebooklib import epub
-        from bs4 import BeautifulSoup
-        book = epub.read_epub(path)
-        texts = []
-        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-            soup = BeautifulSoup(item.get_body_content(), 'html.parser')
-            texts.append(soup.get_text())
-        return '\n\n'.join(texts)
-    elif path.lower().endswith('.md'):
-        with open(path, 'r', encoding='utf-8') as f:
-            raw = f.read()
-        return _strip_markdown(raw)
-    else:
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
-
-
-def _strip_markdown(text):
-    """Convert markdown to clean plain text for TTS."""
-    import re
-    lines = text.split('\n')
-    out = []
-    in_table = False
-    in_code = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        # Code blocks
-        if stripped.startswith('```'):
-            in_code = not in_code
-            continue
-        if in_code:
-            continue
-
-        # Horizontal rules
-        if re.match(r'^[-*_]{3,}\s*$', stripped):
-            continue
-
-        # Headings: H1 is the book title — skip it; keep H2+ text
-        heading = re.match(r'^(#{1,6})\s+(.+)$', stripped)
-        if heading:
-            if len(heading.group(1)) == 1:
-                continue
-            out.append(heading.group(2))
-            out.append('')
-            continue
-
-        # Table rows: convert to readable text
-        if '|' in stripped and not stripped.startswith('>'):
-            if re.match(r'^[\|\s\-:]+$', stripped):
-                continue  # skip separator rows
-            cells = [c.strip() for c in stripped.split('|') if c.strip()]
-            if cells:
-                out.append('. '.join(cells) + '.')
-            continue
-
-        # Blockquotes
-        if stripped.startswith('>'):
-            content = re.sub(r'^>\s*', '', stripped).strip()
-            # Skip chapter-footer metadata lines (Chapter status, Word count, Thread, Biblical anchor, Next)
-            if re.match(r'^\*{0,2}(Chapter status|Word count|Thread|Biblical anchor|Next)\b', content, re.IGNORECASE):
-                continue
-            out.append(content)
-            continue
-
-        # List items — apply inline formatting before appending
-        li = re.match(r'^[\*\-\+]\s+(.+)$', stripped)
-        num_li = re.match(r'^\d+\.\s+(.+)$', stripped)
-        if li:
-            out.append(_clean_inline(li.group(1)))
-            continue
-        if num_li:
-            out.append(_clean_inline(num_li.group(1)))
-            continue
-
-        # Inline formatting: bold, italic, code, links, images
-        line = _clean_inline(line)
-
-        if stripped == '':
-            out.append('')
-        elif line.strip():
-            out.append(line.strip())
-
-    return '\n'.join(out)
-
-
-def _clean_inline(line):
-    """Strip inline markdown formatting from a single line."""
-    import re
-    line = re.sub(r'!\[.*?\]\(.*?\)', '', line)               # images first (remove entirely)
-    line = re.sub(r'\[(.+?)\]\(.*?\)', r'\1', line)           # links → just text
-    line = re.sub(r'\*\*(.+?)\*\*', r'\1', line)              # bold
-    line = re.sub(r'__(.+?)__', r'\1', line)                  # bold alt
-    line = re.sub(r'\*(.+?)\*', r'\1', line)                  # italic
-    line = re.sub(r'_(.+?)_', r'\1', line)                    # italic alt
-    line = re.sub(r'`(.+?)`', r'\1', line)                    # inline code
-    line = re.sub(r'<[^>]+>', '', line)                       # HTML tags
-    line = re.sub(r' {2,}', ' ', line)                        # collapse spaces
-    return line.strip()
 
 
 def split_text(text, max_chars=200, split_clauses=True):
@@ -1877,7 +1770,7 @@ class TTSBookApp:
 
             self._log(f"--- Batch item {processed}: {item['file_name']} ---", "info")
             self._log(f"  Voice: {item['voice_name']}", "info")
-            self._log(f"  Chunks: estimating...", "info")
+            self._log("  Chunks: estimating...", "info")
             try:
                 resume_job_dir, resume_state = None, None
                 item.pop("try_resume", None)  # consume flag; lookup always runs
@@ -1901,7 +1794,7 @@ class TTSBookApp:
                     item["chunks_total"] = total_n
                     self.root.after(0, self._refresh_batch_tree)
                 else:
-                    self._log(f"  Starting fresh (no partial job found)", "info")
+                    self._log("  Starting fresh (no partial job found)", "info")
                 output_path = self._do_generate(
                     text=item["text"],
                     settings=item["settings"],
@@ -1925,7 +1818,7 @@ class TTSBookApp:
                         self.root.after(0, lambda p=output_path: self._auto_convert(p))
                 elif self.cancel_token.cancelled:
                     item["status"] = "pending"  # keep for resume
-                    self._log(f"  ⏸ Cancelled (partial state saved)", "warn")
+                    self._log("  ⏸ Cancelled (partial state saved)", "warn")
                     break
             except Exception as e:
                 item["status"] = "error"
@@ -2958,7 +2851,7 @@ class TTSBookApp:
                 self.root.after(0, lambda: self._on_done(output_path))
             else:
                 self.root.after(0, lambda: self._on_cancel())
-        except Exception as e:
+        except Exception:
             self.root.after(0, lambda: self._on_error(str(e)))
 
     def _is_chunk_garbled(self, wav_path: str, text: str):
