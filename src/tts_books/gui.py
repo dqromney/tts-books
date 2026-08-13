@@ -40,6 +40,7 @@ from tts_books.config import (
     save_config,
 )
 from tts_books.memory.pruning import do_prune, mem_rss_mb
+from tts_books.quality.garbled import is_chunk_garbled
 from tts_books.quality.whisper_backend import whisper as _whisper
 from tts_books.generation.chunking import split_text
 from tts_books.generation.stitching import crossfade_chunks, remove_dc_offset
@@ -2602,218 +2603,6 @@ class TTSBookApp:
         except Exception:
             self.root.after(0, lambda: self._on_error(str(e)))
 
-    def _is_chunk_garbled(self, wav_path: str, text: str):
-        """Return a reason string if the chunk is garbled, or None if it sounds clean.
-
-        Four checks in order:
-        1. Duration heuristic — catches cutoffs and severe repetition loops.
-        2. Word overlap — what fraction of expected words appear in transcription.
-           Catches word substitutions, mid-chunk phoneme glitches, and wrong words
-           that the old word-count check missed.
-        3. Word-count fallback — catches large-scale dropped speech (< 50% words).
-        4. Tail check — catches garbage appended to an otherwise clean chunk.
-        """
-        import re as _re
-
-        try:
-            info = torchaudio.info(wav_path)
-            duration = info.num_frames / info.sample_rate
-            n_chars = len(text.strip())
-            if n_chars < 10:
-                return None
-            if duration < (n_chars / 25.0):
-                return "too short"
-            if duration > (n_chars / 3.5):
-                return "too long"
-        except Exception:
-            return None
-
-        n_words = len(text.split())
-        if n_words < 5:
-            return None
-
-        # Build expected word set once (used by checks 2 and 4).
-        # Exclude hyphenated words (pronunciation substitutions like "ay-bish",
-        # "Ah-mun", "La-moan-ee") — Whisper transcribes the audio sound, not the
-        # synthetic spelling, so they never appear in the transcript and would
-        # artificially deflate the overlap score for substitution-dense chunks.
-        _tokenize = lambda w: _re.sub(r'[^a-z0-9]', '', w.lower())
-        expected_set = {_tokenize(w) for w in text.split() if len(w) >= 3 and '-' not in w}
-
-        try:
-            if not _whisper.is_loaded and not _whisper.is_unavailable:
-                self._log("  Loading faster-whisper tiny.en for garble detection…", "info")
-            wm = _whisper.load()
-            if wm is None:
-                return None
-
-            segments, _ = wm.transcribe(
-                wav_path, language="en", beam_size=1, word_timestamps=True
-            )
-            segments = list(segments)
-            if not segments:
-                return "STT: no transcription"
-
-            transcribed_text = ' '.join(s.text for s in segments)
-
-            # Check 2: word overlap — catches wrong/substituted words
-            # A clean chunk should have most of its expected words recognized.
-            # Threshold of 45% is lenient enough for whisper errors on tiny.en
-            # but low enough to flag phonetic garbage and word substitutions.
-            transcribed_set = {_tokenize(w) for w in transcribed_text.split() if len(w) >= 3}
-            if expected_set:
-                overlap = len(transcribed_set & expected_set) / len(expected_set)
-                if overlap < 0.45:
-                    return f"STT: {overlap:.0%} word overlap ({len(transcribed_set & expected_set)}/{len(expected_set)} matched)"
-
-            # Check 3: word-count ratio — fallback for massive dropouts
-            spoken_words = sum(len(s.text.split()) for s in segments)
-            if spoken_words / n_words < 0.5:
-                return f"STT: {spoken_words}/{n_words} words ({spoken_words/n_words:.0%})"
-
-            all_words = [w for s in segments for w in (s.words or [])]
-
-            # Check 4: unrecognized tail — whisper stopped before audio ended.
-            # The model sometimes appends a burst of noise/phonemes that whisper
-            # can't parse at all, so it simply stops transcribing early.
-            # Signal: last transcribed word ends > 2.5 s before audio ends.
-            if all_words:
-                last_word_end = all_words[-1].end
-                unrecognized_tail = duration - last_word_end
-                if unrecognized_tail > 2.5:
-                    return (f"STT: {unrecognized_tail:.1f}s unrecognized tail"
-                            f" (whisper stopped at {last_word_end:.1f}s/{duration:.1f}s)")
-
-            # Check 5: garbled words whisper DID transcribe at the tail.
-            # The model sometimes appends wrong but speech-like words at the end.
-            # Signal: last 6 transcribed words mostly not in expected-text word set.
-            if len(all_words) >= 6:
-                end_words = all_words[-6:]
-                end_tokens = [
-                    _tokenize(w.word)
-                    for w in end_words
-                    if len(w.word.strip()) >= 3
-                ]
-                if len(end_tokens) >= 2:
-                    match_frac = sum(1 for t in end_tokens if t in expected_set) / len(end_tokens)
-                    if match_frac < 0.35:
-                        return f"STT: tail garbled ({match_frac:.0%} end words recognized)"
-
-            # Check 6: word stutter/repetition — consecutive identical tokens in
-            # transcription that are NOT expected to repeat in the source text.
-            # Catches the model stuttering mid-generation ("the the most unlikely…").
-            word_tokens_all = [_tokenize(w.word) for w in all_words]
-            # Build set of words that legitimately repeat consecutively in the source
-            exp_tokens_seq = [_tokenize(w) for w in text.split()]
-            expected_consec = {
-                exp_tokens_seq[i] for i in range(1, len(exp_tokens_seq))
-                if exp_tokens_seq[i] and exp_tokens_seq[i] == exp_tokens_seq[i - 1]
-            }
-            stutter_pairs = [
-                word_tokens_all[i] for i in range(1, len(word_tokens_all))
-                if (word_tokens_all[i]
-                    and word_tokens_all[i] == word_tokens_all[i - 1]
-                    and word_tokens_all[i] not in expected_consec
-                    and not word_tokens_all[i].isdigit())
-            ]
-            if stutter_pairs:
-                sample = stutter_pairs[0]
-                extra = f", {len(stutter_pairs)} pairs" if len(stutter_pairs) > 1 else ""
-                return f"STT: word stutter ('{sample}' repeated{extra})"
-
-            # Check 7: final content word absent — the model stopped speaking before
-            # finishing the chunk, or substituted garbage at the very end.
-            # Only checks unhyphenated words (≥ 5 chars) to avoid pronunciation subs.
-            last_content_raw = next(
-                (w for w in reversed(text.split())
-                 if '-' not in w and re.match(r'[a-zA-Z]{5}', w)),
-                None
-            )
-            if last_content_raw:
-                last_content = _tokenize(last_content_raw)
-                # Skip check for words Whisper likely can't spell: proper nouns, place
-                # names, archaic terms (tekoa, bashan, viols, etc.) identified by a
-                # vowel ratio below 20% — standard English averages ~38%.
-                vowel_count = sum(1 for c in last_content if c in 'aeiou')
-                _whisper_knows = len(last_content) <= 3 or (vowel_count / len(last_content)) >= 0.2
-                if _whisper_knows:
-                    transcribed_tokens = {_tokenize(w) for w in transcribed_text.split()}
-                    if last_content not in transcribed_tokens:
-                        return f"STT: final content word '{last_content}' not spoken"
-
-            # Check 8: phrase-level repetition loop — same 5-gram appears twice in
-            # the transcription but not in the source text.  Catches the model looping
-            # back and repeating a clause at the end of a chunk.
-            _N = 5
-            if len(word_tokens_all) >= _N * 2:
-                exp_toks = [_tokenize(w) for w in text.split() if _tokenize(w)]
-                exp_ngrams = {
-                    tuple(exp_toks[i:i + _N])
-                    for i in range(len(exp_toks) - _N + 1)
-                }
-                seen_ngrams: set = set()
-                for i in range(len(word_tokens_all) - _N + 1):
-                    gram = tuple(t for t in word_tokens_all[i:i + _N] if t)
-                    if len(gram) < _N:
-                        continue
-                    if gram in seen_ngrams and gram not in exp_ngrams:
-                        preview = ' '.join(gram[:4]) + '…'
-                        return f"STT: phrase repetition loop ('{preview}')"
-                    seen_ngrams.add(gram)
-
-            # Check 9: anaphoric over-repetition — the TTS loops on a phrase that
-            # already repeats 2+ times in the source (Holland-style anaphora like
-            # "You will be called to…" ×3).  Check 8 misses these because the
-            # phrase IS in exp_ngrams; this check catches one or more extra copies.
-            if len(word_tokens_all) >= _N * 2:
-                from collections import Counter as _Counter
-                exp_ngram_counts = _Counter(
-                    tuple(exp_toks[i:i + _N])
-                    for i in range(len(exp_toks) - _N + 1)
-                )
-                trx_ngram_counts = _Counter(
-                    tuple(t for t in word_tokens_all[i:i + _N] if t)
-                    for i in range(len(word_tokens_all) - _N + 1)
-                )
-                for gram, trx_count in trx_ngram_counts.items():
-                    src_count = exp_ngram_counts.get(gram, 0)
-                    if src_count >= 2 and trx_count > src_count:
-                        preview = ' '.join(gram[:4]) + '…'
-                        return (f"STT: anaphoric loop ('{preview}' "
-                                f"{trx_count}x spoken, {src_count}x in source)")
-
-            # Check 10: single-source phrase spoken twice — catches the case
-            # where a 5+ token phrase appears exactly ONCE in the source but
-            # TWO OR MORE times in the transcription.  Check 8 misses this
-            # because the phrase IS in exp_ngrams; Check 9 misses it because
-            # src_count is 1 (not ≥2).  This is the classic "the road went
-            # through the dust, as all roads went through the dust, as all
-            # roads went through the dust" loop.
-            _N6 = 6  # slightly longer than Check 8's N to avoid false-positives
-                     # on legitimately similar clauses
-            if len(word_tokens_all) >= _N6 * 2 and len(exp_toks) >= _N6:
-                from collections import Counter as _Counter6
-                exp_ngram_counts6 = _Counter6(
-                    tuple(exp_toks[i:i + _N6])
-                    for i in range(len(exp_toks) - _N6 + 1)
-                )
-                trx_ngram_counts6 = _Counter6(
-                    tuple(t for t in word_tokens_all[i:i + _N6] if t)
-                    for i in range(len(word_tokens_all) - _N6 + 1)
-                )
-                for gram, trx_count in trx_ngram_counts6.items():
-                    if len(gram) < _N6:
-                        continue
-                    src_count = exp_ngram_counts6.get(gram, 0)
-                    if src_count == 1 and trx_count >= 2:
-                        preview = ' '.join(gram[:5]) + '…'
-                        return (f"STT: phrase spoken twice ('{preview}' "
-                                f"{trx_count}x spoken, 1x in source)")
-
-        except Exception:
-            pass
-        return None
-
     def _update_mem_bar(self):
         """Refresh the toolbar RAM progress bar with current system memory usage."""
         try:
@@ -3030,7 +2819,7 @@ class TTSBookApp:
                 except Exception:
                     pass
 
-                garble_reason = self._is_chunk_garbled(fpath, chunk)
+                garble_reason = is_chunk_garbled(fpath, chunk, _whisper, self)
                 if garble_reason:
                     # Save the initial attempt as the current best before retrying.
                     # Each retry overwrites fpath; we restore best if all retries fail.
@@ -3061,7 +2850,7 @@ class TTSBookApp:
                         del retry_wav
                         gc.collect()
                         ctypes.CDLL("libc.so.6").malloc_trim(0)
-                        garble_reason = self._is_chunk_garbled(fpath, chunk)
+                        garble_reason = is_chunk_garbled(fpath, chunk, _whisper, self)
                         if not garble_reason:
                             # Clean retry — discard the saved best and keep this one
                             os.remove(best_fpath)
