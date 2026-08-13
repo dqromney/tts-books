@@ -41,6 +41,7 @@ from tts_books.config import (
 )
 from tts_books.batch import load_batch_queue as _load_batch_queue_data
 from tts_books.batch import save_batch_queue as _save_batch_queue_data
+from tts_books.generation.archiving import archive_job, restore_for_rework, scan_rework_jobs
 from tts_books.memory.pruning import do_prune, mem_rss_mb
 from tts_books.quality.garbled import is_chunk_garbled
 from tts_books.quality.whisper_backend import whisper as _whisper
@@ -2938,51 +2939,12 @@ class TTSBookApp:
 
     def _archive_job(self, jd, garbled_chunks, output_path):
         """Move completed job dir to archive/, save log, write rework.json if needed."""
-        os.makedirs(self._archive_dir, exist_ok=True)
-        dest = os.path.join(self._archive_dir, os.path.basename(jd))
-        if os.path.exists(dest):
-            dest = dest + "_" + datetime.now().strftime("%Y%m%d%H%M%S")
-        shutil.move(jd, dest)
-
-        # Save plain-text log snapshot
-        log_path = os.path.join(dest, "generation.log")
-        try:
-            with open(log_path, "w", encoding="utf-8") as f:
-                f.writelines(self.buffer)
-        except Exception:
-            pass
-
-        if garbled_chunks:
-            rework = {
-                "output_path": output_path,
-                "archived": datetime.now().isoformat(),
-                "rework_chunks": garbled_chunks,
-            }
-            rework_path = os.path.join(dest, "rework.json")
-            with open(rework_path, "w", encoding="utf-8") as f:
-                json.dump(rework, f, indent=2, ensure_ascii=False)
-            self._log(
-                f"⚠ {len(garbled_chunks)} chunk(s) need rework → {rework_path}", "warn")
-
-        self._log(f"Job archived → {dest}", "info")
+        archive_job(jd, garbled_chunks, output_path, self._archive_dir, self)
         self.root.after(0, self._refresh_rework_badge)
 
     def _scan_rework_jobs(self):
         """Return list of (archive_dir, rework_info) for all pending rework jobs."""
-        jobs = []
-        if not os.path.isdir(self._archive_dir):
-            return jobs
-        for name in sorted(os.listdir(self._archive_dir)):
-            rp = os.path.join(self._archive_dir, name, "rework.json")
-            if os.path.exists(rp):
-                try:
-                    with open(rp, encoding="utf-8") as f:
-                        info = json.load(f)
-                    if info.get("rework_chunks"):
-                        jobs.append((os.path.join(self._archive_dir, name), info))
-                except Exception:
-                    pass
-        return jobs
+        return scan_rework_jobs(self._archive_dir)
 
     def _refresh_rework_badge(self):
         """Update Rework button to show pending count."""
@@ -3197,64 +3159,18 @@ class TTSBookApp:
 
     def _process_rework(self, arc_dir):
         """Copy archive back to jobs/, remove garbled WAVs, resume generation."""
-        rp = os.path.join(arc_dir, "rework.json")
         try:
-            with open(rp, encoding="utf-8") as f:
-                rework_info = json.load(f)
-        except Exception as exc:
-            messagebox.showerror("Rework error", f"Cannot read rework.json:\n{exc}")
+            dest_jd, state, text = restore_for_rework(arc_dir, self._jobs_dir)
+        except RuntimeError as exc:
+            messagebox.showerror("Rework error", str(exc))
             return
 
-        job_id   = os.path.basename(arc_dir)
-        dest_jd  = os.path.join(self._jobs_dir, job_id)
-        bad_idxs = {c["index"] for c in rework_info.get("rework_chunks", [])}
-
-        # Copy archive → jobs dir (archive stays intact until rework completes)
-        if os.path.exists(dest_jd):
-            shutil.rmtree(dest_jd, ignore_errors=True)
-        shutil.copytree(arc_dir, dest_jd)
-
-        # Remove the garbled WAV files so the resume loop regenerates them
-        for idx in bad_idxs:
-            bad_wav = os.path.join(dest_jd, f"chunk_{idx:06d}.wav")
-            if os.path.exists(bad_wav):
-                os.remove(bad_wav)
-
-        # Also remove rework.json from the copy (it belongs in the archive)
-        for fname in ("rework.json", "generation.log"):
-            p = os.path.join(dest_jd, fname)
-            if os.path.exists(p):
-                os.remove(p)
-
-        # Patch state.json — remove garbled indices from completed set
-        state_path = os.path.join(dest_jd, "state.json")
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                state = json.load(f)
-            state["completed"] = [i for i in state.get("completed", [])
-                                  if i not in bad_idxs]
-            with open(state_path, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2)
-        except Exception as exc:
-            messagebox.showerror("Rework error", f"Cannot patch state.json:\n{exc}")
-            shutil.rmtree(dest_jd, ignore_errors=True)
-            return
-
-        # Remove the old archive entry — it will be replaced when rework completes
+        job_id = os.path.basename(arc_dir)
+        bad_count = len(state.get("completed", [])) - sum(1 for _ in state.get("completed", []))
+        # Archive is deleted AFTER restore so the job is safe in jobs/ first (Risk #6)
         shutil.rmtree(arc_dir, ignore_errors=True)
         self.root.after(0, self._refresh_rework_badge)
-
-        self._log(f"Rework: restoring {job_id} — {len(bad_idxs)} chunk(s) to regenerate", "info")
-
-        # Load chunks and resume via the normal generate path
-        chunks_file = os.path.join(dest_jd, "chunks.json")
-        try:
-            with open(chunks_file, encoding="utf-8") as f:
-                chunks_data = json.load(f)
-            text = "\n".join(chunks_data["chunks"])
-        except Exception as exc:
-            messagebox.showerror("Rework error", f"Cannot read chunks.json:\n{exc}")
-            return
+        self._log(f"Rework: restoring {job_id} — regenerating garbled chunks", "info")
 
         self._startup_job = (dest_jd, state)
         self.text_area.delete("1.0", "end")
