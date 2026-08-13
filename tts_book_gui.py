@@ -18,6 +18,7 @@ import json
 import hashlib
 import time
 import shutil
+from dataclasses import dataclass, asdict, fields as dataclass_fields
 from datetime import datetime
 from typing import Protocol
 
@@ -411,6 +412,54 @@ def _remove_dc_offset(audio, sr, cutoff_hz=15.0):
     arr = audio.numpy()[0].astype(np.float64)
     filtered = filtfilt(b, a, arr).astype(np.float32)
     return th.from_numpy(filtered).unsqueeze(0)
+
+
+@dataclass
+class Settings:
+    """User-configurable generation parameters snapshotted from the Advanced
+    Options panel.
+
+    Flows into the on-disk batch queue, state.json checkpoints, and
+    _do_generate. Wire format is a plain dict via to_dict()/from_dict();
+    the dataclass exists as the single source of truth for field names
+    and defaults.
+
+    Note: ref_path is included in the snapshot but intentionally NOT
+    written back to the UI by _apply_settings_to_ui — voice/reference
+    selection is per-batch-item, not per-settings block.
+    """
+
+    temperature: float = 0.8
+    min_p: float = 0.0
+    top_p: float = 0.95
+    top_k: int = 1000
+    repetition_penalty: float = 1.2
+    norm_loudness: bool = True
+    split_clauses: bool = True
+    chunk_size: int = 200
+    seed: int = 0
+    ref_path: str | None = None
+    cpu_threads: int = 4
+    lead_silence: float = 0.0
+    trail_silence: float = 0.0
+    auto_mp3: bool = False
+    reload_every: int = 0
+    prune_every: int = 1
+    crossfade_ms: int = 50
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "Settings":
+        """Build from a possibly-partial dict. Unknown keys are ignored so
+        older state.json / queue files remain loadable after new fields
+        are added. Missing keys fall back to dataclass defaults.
+        """
+        if not d:
+            return cls()
+        known = {f.name for f in dataclass_fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 class Logger(Protocol):
@@ -2129,46 +2178,50 @@ class TTSBookApp:
                 pass
         return None
 
-    def _snapshot_settings(self):
+    def _snapshot_settings(self) -> dict:
         """Return dict of current UI settings for batch queue snapshot."""
-        return {
-            "temperature": self.temp.get(),
-            "min_p": self.min_p.get(),
-            "top_p": self.top_p.get(),
-            "top_k": int(self.top_k.get()),
-            "repetition_penalty": self.rep_pen.get(),
-            "norm_loudness": self.norm.get(),
-            "split_clauses": self.split_clauses.get(),
-            "chunk_size": self.chunk_size.get(),
-            "seed": self.seed.get(),
-            "ref_path": self.ref_path.get() or None,
-            "cpu_threads": self.cpu_threads.get(),
-            "lead_silence": self.lead_silence.get(),
-            "trail_silence": self.trail_silence.get(),
-            "auto_mp3": self.auto_mp3.get(),
-            "reload_every": self.reload_every.get(),
-            "prune_every":  self.prune_every.get(),
-            "crossfade_ms": self.crossfade_ms.get(),
-        }
+        return Settings(
+            temperature=self.temp.get(),
+            min_p=self.min_p.get(),
+            top_p=self.top_p.get(),
+            top_k=int(self.top_k.get()),
+            repetition_penalty=self.rep_pen.get(),
+            norm_loudness=self.norm.get(),
+            split_clauses=self.split_clauses.get(),
+            chunk_size=self.chunk_size.get(),
+            seed=self.seed.get(),
+            ref_path=self.ref_path.get() or None,
+            cpu_threads=self.cpu_threads.get(),
+            lead_silence=self.lead_silence.get(),
+            trail_silence=self.trail_silence.get(),
+            auto_mp3=self.auto_mp3.get(),
+            reload_every=self.reload_every.get(),
+            prune_every=self.prune_every.get(),
+            crossfade_ms=self.crossfade_ms.get(),
+        ).to_dict()
 
     def _apply_settings_to_ui(self, settings):
-        """Reflect a batch item's saved settings in the Advanced Options panel."""
-        self.temp.set(settings.get("temperature", 0.8))
-        self.min_p.set(settings.get("min_p", 0.0))
-        self.top_p.set(settings.get("top_p", 0.95))
-        self.top_k.set(int(settings.get("top_k", 1000)))
-        self.rep_pen.set(settings.get("repetition_penalty", 1.2))
-        self.norm.set(settings.get("norm_loudness", True))
-        self.split_clauses.set(settings.get("split_clauses", True))
-        self.chunk_size.set(settings.get("chunk_size", 200))
-        self.seed.set(settings.get("seed", 0))
-        self.cpu_threads.set(settings.get("cpu_threads", 4))
-        self.lead_silence.set(settings.get("lead_silence", 0.0))
-        self.trail_silence.set(settings.get("trail_silence", 0.0))
-        self.auto_mp3.set(settings.get("auto_mp3", False))
-        self.reload_every.set(int(settings.get("reload_every", 0)))
-        self.prune_every.set(int(settings.get("prune_every", 1)))
-        self.crossfade_ms.set(int(settings.get("crossfade_ms", 50)))
+        """Reflect a batch item's saved settings in the Advanced Options panel.
+
+        ref_path is intentionally not applied; voice selection is separate.
+        """
+        s = Settings.from_dict(settings)
+        self.temp.set(s.temperature)
+        self.min_p.set(s.min_p)
+        self.top_p.set(s.top_p)
+        self.top_k.set(s.top_k)
+        self.rep_pen.set(s.repetition_penalty)
+        self.norm.set(s.norm_loudness)
+        self.split_clauses.set(s.split_clauses)
+        self.chunk_size.set(s.chunk_size)
+        self.seed.set(s.seed)
+        self.cpu_threads.set(s.cpu_threads)
+        self.lead_silence.set(s.lead_silence)
+        self.trail_silence.set(s.trail_silence)
+        self.auto_mp3.set(s.auto_mp3)
+        self.reload_every.set(s.reload_every)
+        self.prune_every.set(s.prune_every)
+        self.crossfade_ms.set(s.crossfade_ms)
 
     def _open_pron_dict(self):
         """Open the pronunciation substitution dictionary editor."""
