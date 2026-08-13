@@ -19,6 +19,7 @@ import hashlib
 import time
 import shutil
 from datetime import datetime
+from typing import Protocol
 
 import gc
 import ctypes
@@ -410,6 +411,24 @@ def _remove_dc_offset(audio, sr, cutoff_hz=15.0):
     arr = audio.numpy()[0].astype(np.float64)
     filtered = filtfilt(b, a, arr).astype(np.float32)
     return th.from_numpy(filtered).unsqueeze(0)
+
+
+class Logger(Protocol):
+    """Log target for background jobs.
+
+    The App implements this interface so non-GUI modules (pipeline,
+    archiving) can accept ``logger: Logger`` without importing tkinter.
+    ``buffer`` is the plain-text line list that ``_archive_job`` writes
+    to ``generation.log``.
+    """
+
+    def info(self, msg: str) -> None: ...
+    def warn(self, msg: str) -> None: ...
+    def error(self, msg: str) -> None: ...
+    def success(self, msg: str) -> None: ...
+
+    @property
+    def buffer(self) -> list[str]: ...
 
 
 class CancelToken:
@@ -912,6 +931,24 @@ class TTSBookApp:
             self.log_area.see("end")
             self.log_area.configure(state="disabled")
         self.root.after(0, _append)
+
+    # Logger protocol implementation. Non-GUI modules take `logger: Logger`
+    # and call these instead of _log(msg, tag) directly.
+    def info(self, msg: str) -> None:
+        self._log(msg, "info")
+
+    def warn(self, msg: str) -> None:
+        self._log(msg, "warn")
+
+    def error(self, msg: str) -> None:
+        self._log(msg, "error")
+
+    def success(self, msg: str) -> None:
+        self._log(msg, "success")
+
+    @property
+    def buffer(self) -> list[str]:
+        return self._log_buffer
 
     def _clear_log(self):
         self.log_area.configure(state="normal")
@@ -3454,7 +3491,7 @@ class TTSBookApp:
         log_path = os.path.join(dest, "generation.log")
         try:
             with open(log_path, "w", encoding="utf-8") as f:
-                f.writelines(self._log_buffer)
+                f.writelines(self.buffer)
         except Exception:
             pass
 
