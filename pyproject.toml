@@ -51,3 +51,6 @@ ignore = ["E501"]  # line-length handled by formatter
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 pythonpath = ["src"]
+markers = [
+    "slow: tests requiring faster-whisper model download or TTS inference",
+]
