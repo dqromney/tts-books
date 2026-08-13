@@ -39,6 +39,8 @@ from tts_books.config import (
     load_config,
     save_config,
 )
+from tts_books.batch import load_batch_queue as _load_batch_queue_data
+from tts_books.batch import save_batch_queue as _save_batch_queue_data
 from tts_books.memory.pruning import do_prune, mem_rss_mb
 from tts_books.quality.garbled import is_chunk_garbled
 from tts_books.quality.whisper_backend import whisper as _whisper
@@ -1381,71 +1383,18 @@ class TTSBookApp:
         self._drag_item = None
 
     def _save_batch_queue(self):
-        """Persist the batch queue to disk so it survives restarts.
-
-        Text is excluded from the JSON — it is reloaded from source_path on
-        startup.  For pasted text (no source file) a sidecar .txt is written
-        alongside the queue file.
-        """
-        items_to_save = []
-        for item in self._batch_queue:
-            entry = {k: v for k, v in item.items()
-                     if k not in ("text", "_eta_str")}
-            if not item.get("source_path") and item.get("text"):
-                sidecar = os.path.join(
-                    os.path.dirname(BATCH_QUEUE_PATH),
-                    f"tts-book.queue-text-{item['id']}.txt",
-                )
-                try:
-                    with open(sidecar, "w", encoding="utf-8") as f:
-                        f.write(item["text"])
-                    entry["_text_sidecar"] = sidecar
-                except Exception:
-                    pass
-            items_to_save.append(entry)
-        data = {"next_id": self._batch_next_id, "items": items_to_save}
-        try:
-            with open(BATCH_QUEUE_PATH, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            pass  # disk full / permission — non-critical
+        """Persist the batch queue to disk so it survives restarts."""
+        _save_batch_queue_data(self._batch_queue, self._batch_next_id)
 
     def _load_batch_queue(self):
         """Restore the batch queue from disk on startup."""
-        if not os.path.isfile(BATCH_QUEUE_PATH):
+        next_id, items = _load_batch_queue_data(load_text_file)
+        if not items and next_id == 0:
             return
-        try:
-            with open(BATCH_QUEUE_PATH) as f:
-                data = json.load(f)
-            self._batch_next_id = data.get("next_id", 0)
-            self._batch_queue = data.get("items", [])
-            for item in self._batch_queue:
-                # Reset any "processing" items back to "pending" (crashed mid-run)
-                if item.get("status") == "processing":
-                    item["status"] = "pending"
-                    item["error"] = ""
-                # Re-load text that was stripped from the saved JSON
-                if "text" not in item:
-                    if item.get("source_path"):
-                        try:
-                            item["text"] = load_text_file(item["source_path"])
-                        except Exception as e:
-                            item["text"] = ""
-                            if item.get("status") != "done":
-                                item["status"] = "error"
-                                item["error"] = f"Cannot reload source: {e}"
-                    elif item.get("_text_sidecar") and os.path.isfile(item["_text_sidecar"]):
-                        try:
-                            with open(item["_text_sidecar"], encoding="utf-8") as f:
-                                item["text"] = f.read()
-                        except Exception:
-                            item["text"] = ""
-                    else:
-                        item["text"] = ""
-            self._refresh_batch_tree()
-            self._log(f"Restored batch queue: {len(self._batch_queue)} items", "info")
-        except Exception:
-            pass
+        self._batch_next_id = next_id
+        self._batch_queue = items
+        self._refresh_batch_tree()
+        self._log(f"Restored batch queue: {len(self._batch_queue)} items", "info")
 
     def _cleanup_item_sidecar(self, item):
         sidecar = item.get("_text_sidecar")
