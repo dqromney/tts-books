@@ -3,8 +3,6 @@
 All tests operate on synthetic torch tensors; no WAV files needed.
 """
 
-import numpy as np
-import pytest
 import torch as th
 
 from tts_books.generation.stitching import crossfade_chunks, remove_dc_offset

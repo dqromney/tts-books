@@ -12,7 +12,6 @@ from dataclasses import fields as dataclass_fields
 
 from tts_books.gui import BatchItem, CancelToken, Settings
 
-
 # ── CancelToken ───────────────────────────────────────────────────
 
 class TestCancelToken:

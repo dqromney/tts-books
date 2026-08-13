@@ -9,7 +9,6 @@ Covers edge cases documented in docs/CLAUDE.md:
 - Whitespace normalisation and empty-text fallback
 """
 
-import pytest
 
 from tts_books.generation.chunking import split_text
 

@@ -6,9 +6,7 @@ require faster-whisper; they are marked @pytest.mark.slow and skipped by
 default (run with: pytest -m slow).
 """
 
-import os
 
-import pytest
 import torch as th
 import torchaudio
 

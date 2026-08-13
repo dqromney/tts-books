@@ -4,6 +4,7 @@
 import re
 import time
 import urllib.request
+
 from bs4 import BeautifulSoup
 
 DELAY = 2  # seconds between requests
